@@ -185,7 +185,17 @@ def projection_simplex_pytorch(v: torch.Tensor, z: float = 1.0) -> torch.Tensor:
     return w
 
 ### Algorithms ### 
-def polyak_subgradient_method(h_params, loss_fn, max_iter=100000, target_loss=1.5053, print_every=100, loss_history=[], grad_norm_history=[], min_loss_found=float('inf'), best_h_params=None, projection=None):
+def polyak_subgradient_method(h_params, loss_fn, max_iter=100000, target_loss=1.5053, print_every=100, history = {}, projection=None):
+    # if history fields are not present, initialize them
+    if 'loss_history' not in history:
+        history['loss_history'] = []
+    if 'grad_norm_history' not in history:
+        history['grad_norm_history'] = []
+    if 'min_loss_found' not in history:
+        history['min_loss_found'] = float('inf')
+    if 'best_h_params' not in history:
+        history['best_h_params'] = h_params.data.clone()
+        
     for i in range(max_iter):
         # Compute loss and gradient
         h_params.grad = None
@@ -202,15 +212,42 @@ def polyak_subgradient_method(h_params, loss_fn, max_iter=100000, target_loss=1.
             with torch.no_grad():
                 h_params.data = projection(h_params.data)
 
-        loss_history.append(loss.item())
-        grad_norm_history.append(torch.norm(grad).item())
+        history['loss_history'].append(loss.item())
+        history['grad_norm_history'].append(torch.norm(grad).item())
         if i % print_every == 0:
-            print(f"Iteration {i}: loss = {loss.item():.7f}, step_size = {step_size:.7f}, grad_norm = {torch.norm(grad).item():.7f}, min_loss_found_polyak = {min_loss_found:.6f}")
+            print(f"Iteration {i}: loss = {loss.item():.7f}, step_size = {step_size:.7f}, grad_norm = {history['grad_norm_history'][-1]:.7f}, min_loss_found_polyak = {history['min_loss_found']:.6f}")
 
-        if loss.item() < min_loss_found:
-            min_loss_found = loss.item()
+        if loss.item() < history['min_loss_found']:
+            history['min_loss_found'] = loss.item()
+            history['best_h_params'] = h_params.data.clone()
+    return history
+
+
+
+
+def bfgs(h_params, loss_fn, max_iter=100000, lr=1.0, print_every=100, loss_history=[], grad_norm_history=[], min_loss_found=float('inf'), best_h_params=None):
+    optimizer = torch.optim.LBFGS([h_params], lr=lr)
+    for i in range(max_iter):
+        # Compute loss and gradient
+        def closure(): 
+            optimizer.zero_grad()
+            loss = loss_fn(h_params)
+            grad = torch.autograd.grad(loss, h_params)[0]
+            h_params.grad = grad
+            return loss
+        optimizer.step(closure)
+        loss = closure().item()
+        grad_norm = torch.norm(h_params.grad).item()
+        loss_history.append(loss)
+        grad_norm_history.append(grad_norm)
+        if i % print_every == 0:
+            print(f"Iteration {i}: loss = {loss:.7f}, grad_norm = {grad_norm:.7f}, min_loss_found_bfgs = {min_loss_found:.6f}")
+
+        if loss < min_loss_found:
+            min_loss_found = loss
             best_h_params = h_params.data.clone()
     return best_h_params, min_loss_found, loss_history, grad_norm_history
+
 
 
 
