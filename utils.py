@@ -456,6 +456,8 @@ def prox_linear_method(h_params, loss_fn,print_every, max_iter=1000, prox_linear
         prox_linear_params['max_iters'] = 2000
     if 'solver' not in prox_linear_params:
         prox_linear_params['solver'] = 'ECOS'
+    if 'linesearch' not in prox_linear_params:
+        prox_linear_params['linesearch'] = False
 
     solver_params = {key: prox_linear_params[key] for key in ['abstol', 'reltol', 'feastol', 'max_iters', 'verbose', 'solver']}
     gamma_prox = prox_linear_params['gamma_prox']
