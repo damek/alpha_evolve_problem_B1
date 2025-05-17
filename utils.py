@@ -487,3 +487,170 @@ def prox_linear_method(h_params, loss_fn,print_every, max_iter=1000, prox_linear
             print(f"Iteration {i}: loss = {loss.item():.10f}, step_length = {step_length:.7f}, grad_norm = {history['grad_norm_history'][-1]:.7f}, min_loss_found = {history['min_loss_found']:.10f}")
 
     return history
+
+
+
+def matolcsi_kolountzakis_lp_step(
+    h_k_torch: torch.Tensor,
+    S_target_val: float, # Target sum for normalization, e.g., 2*P
+    delta_x_val: float,
+    P_val_local: int,
+    t_mixing: float = 0.1, # Mixing parameter for the update
+    line_search_iters: int = 0, # Number of iterations for ternary line search for t_mixing
+                                # If 0, uses fixed t_mixing
+    solver_params: dict = None # For the LP solver
+):
+    """
+    Performs one step of the Matolcsi-Kolountzakis iterative LP-based method.
+    1. Solves an LP to find g_0 that maximizes sum(b_j) s.t. ||f_k * g_0||_inf <= ||f_k * f_k||_inf.
+    2. Normalizes g_0 to g_prime such that sum(g_prime_j) = S_target_val.
+    3. Updates h_k to h_{k+1} = (1-t)*h_k + t*g_prime, possibly with line search for t.
+
+    Args:
+        h_k_torch: Current step function heights (P_val_local,). Assumed to be non-negative
+                   and sum to S_target_val.
+        S_target_val: The target sum for the heights vector (e.g., 2 * P_val_local).
+        delta_x_val: Width of each step.
+        P_val_local: Number of pieces.
+        t_mixing: Fixed mixing parameter if line_search_iters is 0.
+        line_search_iters: If > 0, number of iterations for ternary line search for t_mixing.
+        solver_params: Dictionary of parameters for the CVXPY LP solver.
+                       Example: {'solver': 'ECOS', 'verbose': False, 'abstol': 1e-8, ...}
+
+    Returns:
+        h_next_torch: The updated heights vector (P_val_local,).
+                      Returns original h_k_torch if LP fails or no improvement direction.
+        actual_L_h_next: The ||h_next * h_next||_inf value.
+        lp_objective_value: The sum(b_j) achieved by the LP.
+    """
+    if solver_params is None:
+        # Default solver parameters for the LP
+        solver_params = {'solver': 'ECOS', 'verbose': False, 
+                         'abstol': 1e-8, 'reltol': 1e-8, 'feastol': 1e-8, # ECOS specific names
+                         'max_iters': 200}
+        
+
+
+    a_k_np = h_k_torch.detach().cpu().numpy() # Current heights f_k = (a_j)
+
+    # 1. Compute C_max_k = ||f_k * f_k||_infinity
+    f_k_f_k_values = compute_autoconvolution_values(h_k_torch, delta_x_val, P_val_local)
+    # Max over relevant knots (t_1 to t_{2P-1})
+    # f_k_f_k_values has length 2P+1. Indices 1 to 2P-1 (exclusive end)
+    C_max_k = torch.max(f_k_f_k_values[1:-1]).item() 
+
+    # CVXPY Variables for the LP
+    b_cvx = cp.Variable(P_val_local, name="b_coeffs", nonneg=True) # b_j >= 0
+
+    constraints_lp = []
+
+    # Add constraints: -(C_max_k) <= (f_k * g_0)(t_m) <= C_max_k
+    # where g_0 is represented by b_cvx. (f_k * g_0)(t_m) = sum_i (delta_x * a_k_{m-1-i}) * b_i
+    for m_original_idx in range(1, 2 * P_val_local): # m from 1 to 2P-1
+        coeff_vector_m_np = np.zeros(P_val_local)
+        for i_component_b in range(P_val_local): # i_component_b is the index for b_cvx
+            # Coefficient for b_cvx[i_component_b] in the m-th cross-convolution sum
+            # Term is a_k_partner * b_cvx[i_component_b] where partner index is (m-1-i_component_b)
+            partner_idx_for_a = (m_original_idx - 1) - i_component_b
+            if 0 <= partner_idx_for_a < P_val_local:
+                coeff_vector_m_np[i_component_b] = delta_x_val * a_k_np[partner_idx_for_a]
+        
+        f_k_g_0_tm_expr = coeff_vector_m_np @ b_cvx
+        
+        constraints_lp.append(f_k_g_0_tm_expr <= C_max_k)
+        constraints_lp.append(f_k_g_0_tm_expr >= -C_max_k) 
+        # The >= -C_max_k is important as cross-convolution can be negative if not all a_k, b_j are positive,
+        # but here a_k are from h_k_torch (non-neg) and b_cvx is nonneg=True. So f_k_g_0_tm_expr will be non-negative.
+        # Thus, >= -C_max_k is auto-satisfied if C_max_k >=0. Still, good to include for robustness.
+
+    # Objective function: maximize sum(b_j)
+    objective_lp = cp.Maximize(cp.sum(b_cvx))
+    problem_lp = cp.Problem(objective_lp, constraints_lp)
+    
+    lp_objective_value = -float('inf') # Default if LP fails
+
+    try:
+        solver_name = solver_params.get('solver', 'ECOS').upper()
+        cvxpy_params = {k: v for k, v in solver_params.items() if k != 'solver'}
+        
+        # Adjust tolerance names for Clarabel if used
+        if solver_name == 'CLARABEL':
+            if 'abstol' in cvxpy_params: cvxpy_params['tol_gap_abs'] = cvxpy_params.pop('abstol')
+            if 'reltol' in cvxpy_params: cvxpy_params['tol_gap_rel'] = cvxpy_params.pop('reltol')
+            if 'feastol' in cvxpy_params: cvxpy_params['tol_feas'] = cvxpy_params.pop('feastol')
+            if 'max_iters' in cvxpy_params: cvxpy_params['max_iter'] = cvxpy_params.pop('max_iters') # Clarabel uses max_iter
+
+        problem_lp.solve(solver=getattr(cp, solver_name), **cvxpy_params)
+        lp_objective_value = problem_lp.value if problem_lp.value is not None else -float('inf')
+
+    except Exception as e: # Broader exception catch for solver issues
+        print(f"LP Solver failed with {solver_params.get('solver', 'ECOS')}: {e}. Problem status: {problem_lp.status}")
+        # No improvement if LP fails, return original h_k
+        current_L_val = torch.max(compute_autoconvolution_values(h_k_torch, delta_x_val, P_val_local)[1:-1]).item()
+        return h_k_torch.clone(), current_L_val, lp_objective_value
+
+    if problem_lp.status not in ["optimal", "optimal_inaccurate"]:
+        print(f"Warning: LP problem not solved to optimality by {solver_params.get('solver', 'ECOS')}. Status: {problem_lp.status}")
+        if b_cvx.value is None:
+            current_L_val = torch.max(compute_autoconvolution_values(h_k_torch, delta_x_val, P_val_local)[1:-1]).item()
+            return h_k_torch.clone(), current_L_val, lp_objective_value
+        # Else, proceed with potentially suboptimal g_0
+    
+    g_0_np = b_cvx.value
+    if g_0_np is None:
+        print("Critical LP solver failure: b_cvx.value is None.")
+        current_L_val = torch.max(compute_autoconvolution_values(h_k_torch, delta_x_val, P_val_local)[1:-1]).item()
+        return h_k_torch.clone(), current_L_val, lp_objective_value
+        
+    g_0_torch = torch.tensor(g_0_np, dtype=h_k_torch.dtype, device=h_k_torch.device)
+
+    # 2. Normalize g_0 to g_prime so that sum(g_prime_j) = S_target_val
+    sum_b_j = torch.sum(g_0_torch).item()
+    if sum_b_j > 1e-9: # Avoid division by zero or very small sum
+        g_prime_torch = (S_target_val / sum_b_j) * g_0_torch
+    else:
+        # If LP solution is near zero, g_prime can't be meaningfully normalized to S_target.
+        # This might happen if C_max_k is very restrictive (e.g. h_k is already great or C_max_k is tiny)
+        # Default to no change in this case or use h_k as g_prime.
+        print("  LP resulted in sum(b_j) near zero. Using h_k as g_prime (no improvement direction).")
+        g_prime_torch = h_k_torch.clone()
+
+    # 3. Determine mixing parameter t and update h
+    chosen_t_mixing = t_mixing
+    if line_search_iters > 0:
+        # Define the objective for line search: L(t_mix) = || ((1-t_mix)h_k + t_mix*g_prime)^2 ||_inf
+        def L_of_t_mix_func(t_mix_val):
+            if not (0.0 <= t_mix_val <= 1.0): return float('inf')
+            h_mixed = (1 - t_mix_val) * h_k_torch + t_mix_val * g_prime_torch
+            # h_mixed should be non-negative here as t_mix_val is in [0,1]
+            # and h_k_torch, g_prime_torch are non-negative.
+            autoconv_mixed = compute_autoconvolution_values(h_mixed, delta_x_val, P_val_local)
+            return torch.max(autoconv_mixed[1:-1]).item()
+
+        # Ternary search for t_mix_val
+        t_left, t_right = 0.0, 1.0
+        for _ in range(line_search_iters):
+            if abs(t_right - t_left) < 1e-7: break
+            m1 = t_left + (t_right - t_left) / 3
+            m2 = t_right - (t_right - t_left) / 3
+            if L_of_t_mix_func(m1) < L_of_t_mix_func(m2):
+                t_right = m2
+            else:
+                t_left = m1
+        chosen_t_mixing = (t_left + t_right) / 2
+        # print(f"  Line search chose t_mixing = {chosen_t_mixing:.4f}")
+
+    h_next_torch = (1 - chosen_t_mixing) * h_k_torch + chosen_t_mixing * g_prime_torch
+    
+    # Ensure h_next is non-negative and normalized (should be if inputs are and t is in [0,1])
+    h_next_torch = torch.clamp(h_next_torch, min=0.0) # Safety for numerical precision
+    current_sum_h_next = torch.sum(h_next_torch).item()
+    if abs(current_sum_h_next) > 1e-9 : # Avoid division by zero
+         h_next_torch = (S_target_val / current_sum_h_next) * h_next_torch # Re-normalize
+    else: # h_next became zero vector, should not happen with t in [0,1] unless h_k and g_prime were zero
+         h_next_torch = torch.full_like(h_k_torch, S_target_val / P_val_local) # Reinitialize to uniform
+
+
+    actual_L_h_next = torch.max(compute_autoconvolution_values(h_next_torch, delta_x_val, P_val_local)[1:-1]).item()
+    
+    return h_next_torch, actual_L_h_next, lp_objective_value
