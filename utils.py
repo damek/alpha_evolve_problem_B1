@@ -455,7 +455,7 @@ def prox_linear_method(h_params, loss_fn,print_every, max_iter=1000, prox_linear
     if 'max_iters' not in prox_linear_params:
         prox_linear_params['max_iters'] = 2000
     if 'solver' not in prox_linear_params:
-        prox_linear_params['solver'] = 'ECOS'
+        prox_linear_params['solver'] = 'CLARABEL'
     if 'linesearch' not in prox_linear_params:
         prox_linear_params['linesearch'] = False
 
@@ -656,3 +656,55 @@ def matolcsi_kolountzakis_lp_step(
     actual_L_h_next = torch.max(compute_autoconvolution_values(h_next_torch, delta_x_val, P_val_local)[1:-1]).item()
     
     return h_next_torch, actual_L_h_next, lp_objective_value
+
+
+
+def lp_method(h_params, loss_fn,print_every, max_iter=1000, lp_params={}, history = {}):
+    # if history fields are not present, initialize them
+    if 'loss_history' not in history:
+        history['loss_history'] = []
+    if 'grad_norm_history' not in history:
+        history['grad_norm_history'] = []
+    if 'min_loss_found' not in history:
+        history['min_loss_found'] = float('inf')
+    if 'best_h_params' not in history:
+        history['best_h_params'] = h_params.data.clone()
+    if 'abstol' not in lp_params:
+        lp_params['abstol'] = 1e-09
+    if 'reltol' not in lp_params:
+        lp_params['reltol'] = 1e-09
+    if 'feastol' not in lp_params:
+        lp_params['feastol'] = 1e-09
+    if 'max_iters' not in lp_params:
+        lp_params['max_iters'] = 2000
+    if 'solver' not in lp_params:
+        lp_params['solver'] = 'CLARABEL'
+    if 'line_search_iters' not in lp_params:
+        lp_params['line_search_iters'] = 10
+
+    solver_params = {key: lp_params[key] for key in ['abstol', 'reltol', 'feastol', 'max_iters', 'verbose', 'solver']}
+    P_val_local = h_params.shape[0]
+    S_target_val = 2 * P_val_local
+    delta_x_val = 0.5 / P_val_local
+        
+    for i in range(max_iter):
+        # Compute loss and gradient
+        h_params.grad = None
+        h_next_torch, _, _ = matolcsi_kolountzakis_lp_step(h_params, S_target_val, delta_x_val, P_val_local, t_mixing=1, line_search_iters=lp_params['line_search_iters'], solver_params=solver_params)
+        with torch.no_grad():
+            step_length = torch.norm(h_next_torch - h_params.data).item()
+        h_params.data = h_next_torch
+        loss = loss_fn(h_params)
+        grad = torch.autograd.grad(loss, h_params)[0]
+
+        history['loss_history'].append(loss.item())
+        history['grad_norm_history'].append(torch.norm(grad).item())
+
+        if loss.item() < history['min_loss_found']:
+            history['min_loss_found'] = loss.item()
+            history['best_h_params'] = h_params.data.clone()
+
+        if i % print_every == 0:
+            print(f"Iteration {i}: loss = {loss.item():.10f}, step_length = {step_length:.7f}, grad_norm = {history['grad_norm_history'][-1]:.7f}, min_loss_found = {history['min_loss_found']:.10f}")
+
+    return history
