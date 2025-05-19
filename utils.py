@@ -1,5 +1,4 @@
 import torch
-import torch
 import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
@@ -856,3 +855,271 @@ def lp_method(h_params, loss_fn,print_every, max_iter=1000, lp_params={}, histor
             print(f"Iteration {i}: loss = {loss.item():.10f}, step_length = {step_length:.7f}, grad_norm = {history['grad_norm_history'][-1]:.7f}, min_loss_found = {history['min_loss_found']:.10f}")
 
     return history
+
+
+
+##### SDP Relaxation Methods #####
+
+
+import cvxpy as cp
+import torch
+import numpy as np
+# Assume compute_autoconvolution_values (from your utils) is available if needed
+# for verification, though K_m are constructed directly.
+
+def construct_K_m_matrix(m_original_idx: int, P_val_local: int, delta_x_val: float) -> np.ndarray:
+    """
+    Constructs the symmetric matrix K_m for the quadratic form h^T K_m h = Q_m(h).
+    Q_m(h) = delta_x * sum_j h_j h_{s-j}, where s = m_original_idx - 1.
+    m_original_idx is 1-based (from 1 to 2P-1).
+    """
+    K_m_np = np.zeros((P_val_local, P_val_local), dtype=np.float64)
+    s = m_original_idx - 1 # 0-indexed shift for the discrete convolution H*H
+
+    # Iterate through all possible h_j that can contribute
+    for j in range(P_val_local):
+        l = s - j # This is the index of the "partner" h_l for h_j
+        
+        # Ensure l is also a valid index for h
+        if 0 <= l < P_val_local:
+            # We have a term involving h_j * h_l
+            if j == l:
+                # This is a diagonal term h_j^2. It appears once in the sum for Q_m(h)
+                # with coefficient delta_x.
+                # h^T K h has (K_m)_{j,j} h_j^2. So (K_m)_{j,j} = delta_x.
+                K_m_np[j, j] = delta_x_val
+            elif j < l: # To avoid double counting and ensure symmetry for off-diagonals
+                # This is an off-diagonal term h_j * h_l (and h_l * h_j).
+                # In Q_m(h), it appears as delta_x * (h_j * h_l + h_l * h_j) if both contribute,
+                # which is 2 * delta_x * h_j * h_l.
+                # In h^T K_m h, this corresponds to (K_m)_{j,l}*h_j*h_l + (K_m)_{l,j}*h_l*h_j
+                # = 2 * (K_m)_{j,l} * h_j * h_l (since K_m is symmetric).
+                # So, 2 * (K_m)_{j,l} = 2 * delta_x  => (K_m)_{j,l} = delta_x.
+                K_m_np[j, l] = delta_x_val
+                K_m_np[l, j] = delta_x_val # Maintain symmetry
+            # If j > l, this pair (l,j) would have been handled when the outer loop was at index l.
+            
+    return K_m_np
+
+
+## Test to ensure K_m matrices are correct
+def test_K_m_construction(P_val_test=3):
+    print(f"\n--- Testing K_m construction for P={P_val_test} ---")
+    delta_x_test = 0.5 / P_val_test
+    # Use a fixed h for reproducibility, ensure it's float64
+    h_torch_test = torch.rand(P_val_test, dtype=torch.float64) * 0.5 
+    # Example: P=3, h_torch_test = [0.5, 1.0, 1.5]
+    print(f"Test h: {h_torch_test.numpy()}")
+
+    h_np_test = h_torch_test.numpy()
+
+    # Get Q_m values from existing autoconvolution function
+    all_Q_direct = compute_autoconvolution_values(h_torch_test, delta_x_test, P_val_test)
+    print(f"Direct Q values (Q0 to Q{2*P_val_test}): {all_Q_direct.numpy()}")
+
+    # m_original_idx runs from 1 to 2P-1
+    for m_orig_idx in range(1, 2 * P_val_test):
+        K_m = construct_K_m_matrix(m_orig_idx, P_val_test, delta_x_test)
+        
+        # Calculate h^T K_m h
+        # For 1D h_np_test, h.T @ K @ h is equivalent to h @ K @ h if K is symmetric
+        # Or more explicitly: np.dot(h_np_test, np.dot(K_m, h_np_test))
+        val_from_K = h_np_test @ K_m @ h_np_test
+        
+        # Get corresponding Q_m from the direct computation
+        # all_Q_direct indices are 0 to 2P. m_orig_idx is 1 to 2P-1.
+        val_direct = all_Q_direct[m_orig_idx].item() 
+        
+        print(f"m={m_orig_idx}:")
+        # print(f"  K_{m_orig_idx}:\n{K_m}") # Can be verbose for larger P
+        print(f"  Q_{m_orig_idx}(h) direct: {val_direct:.8f}")
+        print(f"  h^T K_{m_orig_idx} h:    {val_from_K:.8f}")
+        
+        assert np.isclose(val_direct, val_from_K, atol=1e-9), \
+            f"Mismatch for m={m_orig_idx}! Direct: {val_direct}, From K: {val_from_K}"
+    
+    print("K_m construction test passed for all m.")
+
+test_K_m_construction(P_val_test=1000)
+# You would need to have compute_autoconvolution_values defined from your utils.
+# test_K_m_construction(P_val_test=3)
+# test_K_m_construction(P_val_test=4)
+
+
+def solve_sdp_relaxation_lower_bound(
+    P_val_local: int,
+    S_target_val: float,
+    delta_x_val: float,
+    solver_params: dict = None,
+    add_rlt_constraints: bool = True,
+    add_integral_constraint_on_X: bool = True
+):
+    """
+    Solves the SDP relaxation to find a lower bound for min max_m Q_m(h).
+
+    Args:
+        P_val_local: Number of pieces for the step function h.
+        S_target_val: The target sum for the heights vector h (e.g., 2 * P_val_local).
+        delta_x_val: Width of each step in h.
+        solver_params: Dictionary of parameters for the CVXPY SDP solver.
+                       Example: {'solver': 'CLARABEL', 'verbose': True, ...}
+
+    Returns:
+        eta_sdp_optimal: The optimal objective value (lower bound). None if solver fails.
+        h_sdp_optimal: The h vector from the SDP solution. None if solver fails.
+        X_sdp_optimal: The X matrix from the SDP solution. None if solver fails.
+    """
+    if P_val_local > 100: # Adjust threshold as needed
+        print(f"Warning: SDP relaxation for P_val_local={P_val_local} will be very large "
+              f" (LMI size ~{P_val_local+1}x{P_val_local+1}) and may be very slow or run out of memory.")
+
+    if solver_params is None:
+        solver_params = {
+            'solver': 'CLARABEL', 'verbose': True,
+            'tol_gap_abs': 1e-7, 'tol_gap_rel': 1e-7, 'tol_feas': 1e-7, # Clarabel specific names for common tolerances
+            'max_iter': 200 # Clarabel specific name
+        }
+
+    # CVXPY Variables
+    eta_cvx = cp.Variable(name="eta_sdp")
+    h_cvx = cp.Variable(P_val_local, name="h_sdp")
+    X_cvx = cp.Variable((P_val_local, P_val_local), name="X_sdp", symmetric=True)
+
+    constraints_sdp = []
+
+    # 1. Trace(K_m X) <= eta constraints
+    # Also accumulate K_sum for the integral constraint
+    K_sum_np = np.zeros((P_val_local, P_val_local), dtype=np.float64)
+    for m_original_idx in range(1, 2 * P_val_local): # m from 1 to 2P-1
+        K_m_np = construct_K_m_matrix(m_original_idx, P_val_local, delta_x_val)
+        constraints_sdp.append(cp.trace(K_m_np @ X_cvx) <= eta_cvx)
+        if add_integral_constraint_on_X:
+            K_sum_np += K_m_np # Accumulate K_m for the sum
+    # 2. LMI constraint: [X, h; h.T, 1] >> 0
+    # Need to reshape h_cvx to be a column vector for hstack
+    h_cvx_col = h_cvx.reshape((P_val_local, 1)) # Shape: (P, 1)
+    h_cvx_row = h_cvx_col.T                     # Shape: (1, P)
+    
+    # Explicitly shape the constant as a 1x1 matrix
+    one_const = cp.Constant(1).reshape((1, 1)) # Shape: (1, 1)
+    
+    top_block_row = cp.hstack([X_cvx, h_cvx_col])
+    bottom_block_row = cp.hstack([h_cvx_row, one_const]) # Use h_cvx_row
+    
+    LMI_matrix = cp.vstack([top_block_row, bottom_block_row])
+    
+    constraints_sdp.append(LMI_matrix >> 0) # PSD constraint
+
+    # 3. Sum constraint for h
+    constraints_sdp.append(cp.sum(h_cvx) == S_target_val)
+
+    # 4. Non-negativity for h
+    constraints_sdp.append(h_cvx >= 0)
+
+    # 5. (Optional but good) X_ij >= 0 element-wise
+    constraints_sdp.append(X_cvx >= 0) 
+
+    # 6. (Optional but good) Trace(J @ X) == S_target_val**2
+    J_np = np.ones((P_val_local, P_val_local), dtype=np.float64)
+    constraints_sdp.append(cp.trace(J_np @ X_cvx) == S_target_val**2)
+    if add_rlt_constraints:
+        print("Adding RLT-based tightening constraints...")
+        # 7. Sum_j X_ij = S_target * h_i (for each i)
+        # This implies X_cvx @ np.ones(P_val_local) == S_target_val * h_cvx
+        # Or row sums of X: cp.sum(X_cvx, axis=1) == S_target_val * h_cvx
+        # Or column sums due to symmetry: cp.sum(X_cvx, axis=0) == S_target_val * h_cvx.T (careful with shape)
+        for i in range(P_val_local):
+            constraints_sdp.append(cp.sum(X_cvx[i, :]) == S_target_val * h_cvx[i])
+            constraints_sdp.append(cp.sum(X_cvx[:, i]) == S_target_val * h_cvx[i])
+
+        # # 8. X_ii <= S_target * h_i (for each i)
+        # for i in range(P_val_local):
+        #     constraints_sdp.append(X_cvx[i, i] <= S_target_val * h_cvx[i])
+        
+        # # 9. X_ij <= S_target * h_i AND X_ij <= S_target * h_j (for i != j)
+        # # These are effectively X_ij <= S_target * h_cvx[i] and X_ij <= S_target * h_cvx[j]
+        # # The X_cvx[i,i] <= S_target_val * h_cvx[i] covers the diagonal.
+        # # For off-diagonal, we need to be careful if we iterate all i,j or just i<j.
+        # # The set of constraints X_cvx[row, col] <= S_target_val * h_cvx[row] for all row, col
+        # # and X_cvx[row, col] <= S_target_val * h_cvx[col] for all row, col
+        # # covers these due to symmetry of X.
+        # # Simpler: Add P^2 constraints: X_cvx <= S_target_val * h_cvx_col @ np.ones((1,P_val_local)) (elementwise)
+        # # AND X_cvx <= S_target_val * np.ones((P_val_local,1)) @ h_cvx_row (elementwise)
+        # # This is a bit dense to write with cp.
+        # # Let's do it element by element for clarity, combined with 8:
+        # # (Constraint 8 is X_cvx[i,i] <= S_target_val * h_cvx[i])
+        # # For constraint 9 (off-diagonal of McCormick with L=0, U=S_target_val):
+        # # for i in range(P_val_local):
+        # #     for j in range(P_val_local): # This will add P^2 constraints
+        # #         constraints_sdp.append(X_cvx[i, j] <= S_target_val * h_cvx[i])
+        # #         constraints_sdp.append(X_cvx[i, j] <= S_target_val * h_cvx[j])
+        # # This is a lot of constraints. The most impactful are usually X_ii <= U_i h_i and Sum_j X_ij = U_i h_i.
+        # # Let's stick to the ones derived systematically:
+        # # From h_j <= S_target => h_i * h_j <= h_i * S_target => X_ij <= S_target * h_i (for all i,j)
+        # # This covers X_ii <= S_target * h_i as well.
+        # for i in range(P_val_local):
+        #     for j in range(P_val_local):
+        #             constraints_sdp.append(X_cvx[i,j] <= S_target_val * h_cvx[i])
+        #             # Due to symmetry of X and the loop structure, this also implies
+        #             # X_ji <= S_target_val * h_j by swapping roles of i and j.
+        #             # So, effectively covers both X_ij <= S_target*h_i and X_ij <= S_target*h_j
+
+    if add_integral_constraint_on_X:
+        print("Adding integral constraint: Trace( (delta_x * sum K_m) X ) = 1.0")
+        # This corresponds to: integral (f_h*f_h)(t) dt = 1.0
+        # Approximated by: delta_x * sum_{m=1}^{2P-1} Q_m(h) = 1.0
+        # So, delta_x * sum_{m=1}^{2P-1} Trace(K_m X) = 1.0
+        # Trace( (delta_x * K_sum_np) @ X_cvx ) == 1.0
+        constraints_sdp.append(cp.trace( (delta_x_val * K_sum_np) @ X_cvx ) == 1.0)
+        # Make sure K_sum_np was computed correctly if this flag is true. It is accumulated above.
+
+    # Objective function
+    objective_sdp = cp.Minimize(eta_cvx)
+    problem_sdp = cp.Problem(objective_sdp, constraints_sdp)
+
+    print(f"SDP Problem constructed: Variables (eta, h, X elements), Constraints including LMI.")
+    print(f"  P_val_local = {P_val_local}")
+    print(f"  Number of trace constraints: {2 * P_val_local - 1}")
+    print(f"  LMI size: {P_val_local + 1}x{P_val_local + 1}")
+
+
+    eta_sdp_optimal = None
+    h_sdp_optimal_np = None
+    X_sdp_optimal_np = None
+
+    try:
+        solver_name = solver_params.get('solver', 'CLARABEL').upper()
+        cvxpy_params_sdp = {k: v for k, v in solver_params.items() if k != 'solver'}
+        
+        # Adjust tolerance/iter names for specific solvers if needed beyond common ones
+        # CVXPY tries to map them, but direct names are safer if known for the solver.
+        # Example: Clarabel uses 'max_iter', ECOS/SCS often use 'max_iters' via CVXPY.
+        # For Clarabel, specific tolerance names are like tol_gap_abs, tol_gap_rel, tol_feas.
+        
+        problem_sdp.solve(solver=getattr(cp, solver_name), **cvxpy_params_sdp)
+        
+        if problem_sdp.status in ["optimal", "optimal_inaccurate"]:
+            eta_sdp_optimal = eta_cvx.value
+            h_sdp_optimal_np = h_cvx.value
+            X_sdp_optimal_np = X_cvx.value
+            if problem_sdp.status == "optimal_inaccurate":
+                print(f"Warning: SDP solver {solver_name} returned an inaccurate solution.")
+        else:
+            print(f"SDP solver {solver_name} failed or did not find an optimal solution. Status: {problem_sdp.status}")
+
+    except Exception as e:
+        print(f"Error during SDP solve with {solver_params.get('solver', 'CLARABEL')}: {e}")
+        print(f"Problem status before error (if available): {problem_sdp.status}")
+
+    # Convert numpy results back to torch tensors if needed by calling code
+    h_sdp_optimal_torch = None
+    X_sdp_optimal_torch = None
+    if h_sdp_optimal_np is not None:
+        h_sdp_optimal_torch = torch.from_numpy(h_sdp_optimal_np).to(dtype=torch.float64) # Assuming CPU
+    if X_sdp_optimal_np is not None:
+        X_sdp_optimal_torch = torch.from_numpy(X_sdp_optimal_np).to(dtype=torch.float64)
+
+
+    return eta_sdp_optimal, h_sdp_optimal_torch, X_sdp_optimal_torch
+
+
