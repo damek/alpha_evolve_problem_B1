@@ -15,11 +15,159 @@ def return_height_params_google_simplex():
     height_params_google.requires_grad = True
     return height_params_google
 
-def return_best_improvement_found_so_far():
-    file_path_to_load = 'best_found_so_far.pt'
-    loaded_variable = torch.load(file_path_to_load)
-    return loaded_variable
+def initialize_from_matolcsi_vinuesa_analytic(P_val: int) -> torch.Tensor:
+    """
+    Initializes step function heights h based on the Matolcsi & Vinuesa 2010 analytic function.
+    The function is sampled at the midpoint of each of the P_val intervals.
+    The resulting heights are then scaled to sum to S_target.
+    """
+    # Define the x-coordinates for the midpoints of each interval
+    # Interval is [-0.25, 0.25]
+    # delta_x = 0.5 / P_val
+    # x_coords_mid = -0.25 + delta_x/2 + torch.arange(P_val) * delta_x
+    S_target = 2*P_val
+    
+    # More robust way to get midpoints:
+    step_edges = torch.linspace(-0.25, 0.25, P_val + 1, dtype=torch.float64)
+    x_coords_mid = (step_edges[:-1] + step_edges[1:]) / 2.0
 
+    heights_analytic = torch.zeros(P_val, dtype=torch.float64)
+
+    for i, x_mid in enumerate(x_coords_mid):
+        if -0.25 < x_mid < 0:
+            # Ensure argument to power is non-negative; small epsilon if x_mid is very close to -0.25
+            base = torch.clamp(0.500166 + 2 * x_mid, min=1e-12) 
+            heights_analytic[i] = 0.338537 / (base**0.65)
+        elif 0 < x_mid < 0.25:
+             # Ensure argument to power is non-negative; small epsilon if x_mid is very close to 0
+            base = torch.clamp(0.00195 + 2 * x_mid, min=1e-12)
+            heights_analytic[i] = 1.392887 / (base**(1/3))
+        elif x_mid == 0:
+            # The function is not strictly defined at x=0.
+            # We can average the limits, or take one side, or set to a reasonable value.
+            # For simplicity, let's use the limit from the right (as it's larger).
+            # Or, if P_val is even, x_mid will never be exactly 0.
+            # If P_val is odd, one x_mid could be 0.
+            # Taking limit from right:
+            if P_val % 2 != 0 and x_mid == 0: # Only if an interval midpoint is exactly 0
+                base = torch.clamp(0.00195 + 2 * (x_mid + 1e-9), min=1e-12) # slightly to the right of 0
+                heights_analytic[i] = 1.392887 / (base**(1/3))
+            else: # Should not happen for x_mid == 0 if P is even.
+                  # Default to 0 if x_mid is exactly -0.25 or 0.25, or 0 if P is even.
+                heights_analytic[i] = 0.0
+        else: # x_mid is exactly -0.25 or 0.25 or outside (-0.25, 0.25) - should not happen for midpoints
+            heights_analytic[i] = 0.0
+            
+    # Ensure non-negativity due to potential floating point issues near boundaries or clamp
+    heights_analytic = torch.clamp(heights_analytic, min=0.0)
+
+    # Scale so that sum(heights_analytic) = S_target
+    current_sum = torch.sum(heights_analytic)
+    if current_sum > 1e-9: # Avoid division by zero if all sampled heights are zero
+        heights_normalized = (S_target / current_sum) * heights_analytic
+    else:
+        # Fallback: if function samples to near zero everywhere (e.g. P_val is tiny or issue)
+        # initialize to a uniform distribution.
+        print("Warning: Analytic function sampled to near zero sum. Initializing uniformly.")
+        heights_normalized = torch.full((P_val,), S_target / P_val, dtype=torch.float64)
+        
+    return heights_normalized
+
+
+def initialize_from_matolcsi_vinuesa_best_step_208(S_target: float) -> torch.Tensor:
+    """
+    Initializes step function heights h based on the best non-negative step function
+    reported by Matolcsi & Vinuesa (2010) with n=208 pieces.
+    The P_val for this function is fixed at 208.
+    The reported coefficients are scaled to sum to S_target.
+    """
+    P_val = 208 # This is fixed by the paper's data
+
+    # Corrected and complete coefficients from the paper (Appendix A, n=208)
+    # Data provided by user.
+    coeffs_str = """
+    1.21174638 0. 0. 0.25997048 0.47606812
+    0.62295219 0.3296586 0. 0.29734381 0.
+    0. 0. 0. 0. 0.
+    0. 0.00846453 0.05731673 0. 0.13014906
+    0. 0.08357863 0.05268549 0.06456956 0.06158231
+    0. 0. 0. 0. 0.
+    0. 0. 0. 0. 0.
+    0. 0. 0. 0. 0.
+    0. 0. 0. 0. 0. 
+    0.02396999 0. 0. 0.05846552 0.
+    0. 0. 0. 0. 0.0026332
+    0.0509835 0. 0.1283313 0.0904924 0.21232176
+    0.24866151 0.09933512 0.01963586 0.01363895 0.32389841
+    0. 0. 0.14467517 0.0129752 0.
+    0. 0.16299837 0.38329665 0.11361262 0.32074656
+    0.17344291 0.33181372 0.24357561 0.2577003 0.20567824
+    0.13085743 0.17116496 0.14349025 0.07019695 0.
+    0. 0. 0. 0. 0.
+    0. 0. 0. 0. 0.
+    0. 0. 0. 0. 0.
+    0. 0.0131741 0.0342541 0.0427565 0.03045044
+    0.07900079 0.07020678 0.08528342 0.09705597 0.0932896
+    0.09360206 0.06227754 0.07943462 0.08176106 0.10667185
+    0.10178412 0.11421821 0.07773213 0.11021377 0.12190377
+    0.06572457 0.07494855 0. 0. 0.02140202
+    0. 0. 0.0231478 0.00127997 0.
+    0.04672881 0.03886266 0.11141784 0.00695668 0.0466224
+    0.03543131 0.08803511 0.04165729 0.10785652 0.06747342
+    0.18785215 0.31908323 0.3249705 0.09824861 0.23309878
+    0.12428441 0.03200975 0.0933163 0.09527521 0.12202693
+    0.13179059 0.09266878 0.02013746 0.16448047 0.20324945
+    0.21810431 0.27321179 0.25242816 0.19993811 0.13683837
+    0.13304836 0.08794214 0.12893672 0.16904485 0.22510883
+    0.26079786 0.27367504 0.26271896 0.20457964 0.15073917
+    0.11014028 0.09896 0.0926069 0.13269111 0.17329988
+    0.20761774 0.21707182 0.18933169 0.14601258 0.08531506
+    0.06187865 0.06100211 0.09064962 0.12781018 0.17038096
+    0.185766 0.1734501 0.14667009 0.09569536 0.06092822
+    0.03219067 0.0495587 0.09657756 0.16382398 0.22606693
+    0.22230709 0.19833621 0.16155032 0.09330751 0.02838363
+    0.02769322 0.03349924 0.09448887 0.20517242 0.22849741
+    0.24175836 0.19700135 0.18168723
+    """ # The 42nd line has 5 elements, the 43rd (last data) line has 3.
+        # Total lines of numbers: 41 full lines of 5 numbers = 205.
+        # Plus the last line of 3 numbers = 208.
+
+    raw_coeffs = []
+    for line in coeffs_str.strip().split('\n'):
+        # Skip empty lines that might result from an extra newline in the string
+        if not line.strip():
+            continue
+        try:
+            raw_coeffs.extend([float(x) for x in line.split()])
+        except ValueError as e:
+            print(f"Error parsing line: '{line}'")
+            print(f"ValueError: {e}")
+            raise
+    
+    if len(raw_coeffs) != P_val:
+        # This check is crucial. If it fails, the copy-paste or parsing is still off.
+        print(f"CRITICAL PARSING ERROR: Expected {P_val} coefficients for P_val={P_val}, but parsed {len(raw_coeffs)}.")
+        print("Please meticulously re-check the coeffs_str data against the paper's Appendix A for n=208.")
+        print("Parsed data (first 10):", raw_coeffs[:10])
+        print("Parsed data (last 10):", raw_coeffs[-10:])
+        # Fallback to uniform to prevent crashes, but this indicates a data entry problem.
+        heights_paper = torch.full((P_val,), S_target / P_val, dtype=torch.float64)
+        # Or raise ValueError to stop execution until data is fixed
+        # raise ValueError(f"Coefficient parsing error: Expected {P_val}, got {len(raw_coeffs)}")
+    else:
+        heights_paper = torch.tensor(raw_coeffs, dtype=torch.float64)
+
+    current_sum_paper = torch.sum(heights_paper)
+    
+    if current_sum_paper.abs().item() > 1e-9: # Use abs() for sum check
+        heights_normalized = (S_target / current_sum_paper) * heights_paper
+    else:
+        # This case should be less likely if the paper's coefficients are generally positive
+        # and the parsing is correct.
+        print(f"Warning: Paper coefficients (P_val={P_val}) summed to near zero ({current_sum_paper.item()}). Initializing uniformly.")
+        heights_normalized = torch.full((P_val,), S_target / P_val, dtype=torch.float64)
+        
+    return torch.clamp(heights_normalized, min=0.0) # Ensure non-negativity
 
 ### Step function opts ######
 
@@ -608,7 +756,7 @@ def matolcsi_kolountzakis_lp_step(
 
     # 2. Normalize g_0 to g_prime so that sum(g_prime_j) = S_target_val
     sum_b_j = torch.sum(g_0_torch).item()
-    if sum_b_j > 1e-9: # Avoid division by zero or very small sum
+    if sum_b_j > 1e-16: # Avoid division by zero or very small sum
         g_prime_torch = (S_target_val / sum_b_j) * g_0_torch
     else:
         # If LP solution is near zero, g_prime can't be meaningfully normalized to S_target.
