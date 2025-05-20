@@ -168,7 +168,184 @@ def initialize_from_matolcsi_vinuesa_best_step_208(S_target: float) -> torch.Ten
         
     return torch.clamp(heights_normalized, min=0.0) # Ensure non-negativity
 
+def initialize_from_matolcsi_vinuesa_negative_step_40(S_target: float) -> torch.Tensor:
+    """
+    Initializes step function heights h based on the step function with some negative values
+    reported by Matolcsi & Vinuesa (2010) with n=40 pieces.
+    The P_val for this function is fixed at 40.
+    The reported coefficients are scaled to sum to S_target.
+    Note: This function allows negative heights as per the paper's data.
+          The final clamp to min=0.0 is removed if the goal is to represent this function.
+          If non-negativity is required for the user, it should be applied after this.
+    """
+    P_val = 40 # This is fixed by the paper's data (n=40)
+
+    # Coefficients from the paper (Appendix A, n=40, "takes some negative values")
+    coeffs_str = """
+    0.48207353 0.04554229 0.24134642 0.28668407 0.25172981
+    0.17486277 0.10698439 0.08413633 0.37156991 0.17314353
+    0.26803597 0.27442948 0.25757858 0.253061   0.30128962
+    0.40281794 0.19441347 0.55190565 0.57409051 0.38028487
+    0.17315036 0.06598732 0.07804465 0.14234244 -0.5240217
+    0.17903786 0.34074897 0.30705109 0.12916425 -0.06221117
+    -0.12070802 0.00356265 0.48688658 0.29753832 0.11795521
+    -0.13533419 -0.13301797 0.23784038 0.73946548 0.94480925
+    """
+    # 8 lines of 5 numbers = 40 coefficients.
+
+    raw_coeffs = []
+    for line in coeffs_str.strip().split('\n'):
+        if not line.strip():
+            continue
+        try:
+            raw_coeffs.extend([float(x) for x in line.split()])
+        except ValueError as e:
+            print(f"Error parsing line: '{line}'")
+            print(f"ValueError: {e}")
+            raise
+    
+    if len(raw_coeffs) != P_val:
+        print(f"CRITICAL PARSING ERROR: Expected {P_val} coefficients for P_val={P_val}, but parsed {len(raw_coeffs)}.")
+        # Fallback to uniform, but this indicates a data entry problem.
+        heights_paper = torch.full((P_val,), S_target / P_val, dtype=torch.float64)
+    else:
+        heights_paper = torch.tensor(raw_coeffs, dtype=torch.float64)
+
+    current_sum_paper = torch.sum(heights_paper)
+    
+    # Note: The sum of these coefficients might be different from sqrt(2*P_val)
+    # if the "negative values" function was normalized differently or if the target sum is different.
+    # We will scale to the provided S_target.
+    if current_sum_paper.abs().item() > 1e-9:
+        heights_normalized = (S_target / current_sum_paper) * heights_paper
+    else:
+        # This case implies the sum of coefficients from paper is zero, which is unlikely for this data.
+        print(f"Warning: Paper coefficients (P_val={P_val}, negative func) summed to near zero ({current_sum_paper.item()}). Initializing uniformly (non-negative).")
+        # If initializing uniformly, it should be non-negative.
+        heights_normalized = torch.full((P_val,), S_target / P_val, dtype=torch.float64)
+        
+    # Unlike the non-negative case, we do NOT clamp to min=0.0 here by default,
+    # because this function is *defined* to have negative values.
+    # If the calling code needs non-negative heights for its algorithms,
+    # it must apply that transformation itself (e.g., taking abs(), relu(), or using h^2).
+    return heights_normalized
+
 ### Step function opts ######
+
+
+def convert_gaussian_mixture_params_to_step_function(
+    log_weights_params: torch.Tensor, # Shape (K,) - Logits for weights
+    raw_means_params: torch.Tensor,   # Shape (K,) - Raw means before clamping
+    num_mixture_components: int,    # K
+    fixed_sigma: float,             # c - Fixed standard deviation for Gaussians in f_h
+    P_val_step_func: int,           # P - Number of pieces for the output step function
+    S_target_step_func: float,      # Target sum for the step function heights (e.g., 2 * P_val_step_func)
+    f_interval_min: float = -0.25,
+    f_interval_max: float = 0.25
+) -> torch.Tensor:
+    """
+    Converts parameters of a Gaussian mixture (optimized log_weights and raw_means)
+    into a discretized step function with P_val_step_func pieces.
+
+    The process involves:
+    1. Deriving weights (w_i) and clamped means (mu_i) from input parameters.
+    2. Defining the continuous Gaussian mixture PDF f_h(x).
+    3. Sampling this f_h(x) at the midpoints of P_val_step_func intervals.
+    4. Normalizing these sampled heights to sum to S_target_step_func.
+
+    Args:
+        log_weights_params: Logits for the mixture weights.
+        raw_means_params: Raw (unclamped) means for the mixture components.
+        num_mixture_components (K): Number of Gaussians in the mixture.
+        fixed_sigma (c): The fixed standard deviation for each Gaussian.
+        P_val_step_func (P): Number of pieces for the output step function.
+        S_target_step_func: Target sum for the output step function heights.
+        f_interval_min: Min x for the support of the step function.
+        f_interval_max: Max x for the support of the step function.
+
+    Returns:
+        torch.Tensor: A 1D tensor of shape (P_val_step_func,) representing the
+                      heights of the discretized step function.
+    """
+    K = num_mixture_components
+    if log_weights_params.shape[0] != K or raw_means_params.shape[0] != K:
+        raise ValueError(f"Shape mismatch for log_weights or raw_means. Expected {K}.")
+    if P_val_step_func <= 0:
+        raise ValueError("P_val_step_func must be positive.")
+    if fixed_sigma <= 0:
+        raise ValueError("fixed_sigma must be positive.")
+
+    # 1. Derive weights w_i and clamped means mu_i
+    weights = F.softmax(log_weights_params.detach(), dim=0) # Use .detach() if these came from optimization
+    
+    sigma_sq_val = torch.tensor(fixed_sigma**2, dtype=raw_means_params.dtype, device=raw_means_params.device)
+
+    mu_lower_clamp_val = f_interval_min + 3.0 * fixed_sigma
+    mu_upper_clamp_val = f_interval_max - 3.0 * fixed_sigma
+    if mu_lower_clamp_val > mu_upper_clamp_val:
+        center_of_interval = (f_interval_min + f_interval_max) / 2.0
+        mu_lower_clamp_val = center_of_interval
+        mu_upper_clamp_val = center_of_interval
+    
+    clamped_means = torch.clamp(
+        raw_means_params.detach(), # Use .detach()
+        min=torch.tensor(mu_lower_clamp_val, device=raw_means_params.device, dtype=raw_means_params.dtype),
+        max=torch.tensor(mu_upper_clamp_val, device=raw_means_params.device, dtype=raw_means_params.dtype)
+    )
+
+    # 2. Define grid for sampling the continuous PDF f_h(x) to create step function
+    delta_x_step = (f_interval_max - f_interval_min) / P_val_step_func
+    step_edges = torch.linspace(f_interval_min, f_interval_max, 
+                                P_val_step_func + 1, 
+                                device=raw_means_params.device, dtype=raw_means_params.dtype)
+    x_sample_points = (step_edges[:-1] + step_edges[1:]) / 2.0 # Midpoints of step intervals
+
+    # 3. Evaluate the continuous Gaussian mixture PDF f_h(x) at x_sample_points
+    # f_h(x) = sum_i w_i * N(x; mu_i, sigma_sq_val)
+    # x_sample_points: (P_step,)
+    # clamped_means: (K,) -> reshape to (1, K) for broadcasting
+    # weights: (K,) -> reshape to (1, K)
+    # sigma_sq_val: scalar
+    
+    # Reshape for broadcasting:
+    # x_sample_points_exp: (P_step, 1)
+    # clamped_means_exp: (1, K)
+    # weights_exp: (1, K)
+    x_sample_points_exp = x_sample_points.view(-1, 1)
+    clamped_means_exp = clamped_means.view(1, -1)
+    weights_exp = weights.view(1, -1)
+
+    # individual_gaussian_pdfs will have shape (P_step, K)
+    individual_gaussian_pdfs = gaussian_pdf(x_sample_points_exp, clamped_means_exp, sigma_sq_val)
+    
+    # step_function_raw_heights will have shape (P_step,)
+    step_function_raw_heights = torch.sum(weights_exp * individual_gaussian_pdfs, dim=1)
+
+    # 4. Normalize these sampled heights to sum to S_target_step_func
+    # These raw heights are samples of a PDF. Their sum (times delta_x_step) approximates integral f_h(x) dx.
+    # Since f_h(x) already integrates to 1 (because sum(w_i)=1 and Gaussians integrate to 1),
+    # sum(step_function_raw_heights * delta_x_step) should be close to 1.
+    # We want sum(output_heights) = S_target_step_func.
+    # So, output_heights_i = step_function_raw_heights_i * (S_target_step_func / sum(step_function_raw_heights_i))
+    # (This scaling might be different if S_target_step_func is NOT 1/delta_x_step)
+    
+    # Let's scale based on the discrete sum of heights to match S_target_step_func directly.
+    current_sum_of_raw_heights = torch.sum(step_function_raw_heights)
+    
+    if current_sum_of_raw_heights.abs().item() > 1e-9:
+        step_function_heights = (S_target_step_func / current_sum_of_raw_heights) * step_function_raw_heights
+    else:
+        # This would happen if all Gaussians are effectively zero over the sampling points
+        # or if K=0 or weights are ill-defined.
+        print("Warning: Sampled Gaussian mixture summed to near zero. Resulting step function will be uniform.")
+        step_function_heights = torch.full((P_val_step_func,), 
+                                           S_target_step_func / P_val_step_func, 
+                                           device=raw_means_params.device, dtype=raw_means_params.dtype)
+
+    # Ensure non-negativity (should already be, but as a final check)
+    step_function_heights = torch.clamp(step_function_heights, min=0.0)
+    
+    return step_function_heights
 
 # Step function representation:
 # The step function f is implicitly defined by:
@@ -313,12 +490,734 @@ def constrained_loss(P_val=600):
     f_delta_x = (f_x_max - f_x_min) / P_val
     return lambda h : compute_autoconvolution_values(h, f_delta_x, P_val).max()
 
+
 def unconstrained_loss(P_val=600):
     f_interval = (-0.25, 0.25) # interval for f(x)
     f_x_min, f_x_max = f_interval
     f_delta_x = (f_x_max - f_x_min) / P_val
     return lambda log_h : compute_autoconvolution_values(2*P_val*F.softmax(log_h, dim=0), f_delta_x, P_val).max()
 
+
+def unconstrained_loss_TV_of_autoconv(P_val=600, f_interval=(-0.25, 0.25), tv_lambda: float = 1.0):
+    """
+    Creates an unconstrained loss function based on the Total Variation (L1 norm of
+    discrete derivative) of the autoconvolution of f_h, where f_h is derived
+    from log_h via softmax and scaling.
+
+    Loss = lambda_tv * sum(|A_{m+1} - A_m|)
+    Potentially, one might add the max term back: max(A_m) + lambda_tv * sum(|A_{m+1} - A_m|)
+
+    Args:
+        P_val (int): Number of pieces for the step function f_h.
+        f_interval (tuple): (min_x, max_x) for the support of f_h.
+        tv_lambda (float): Weighting factor for the total variation penalty.
+    """
+    f_x_min, f_x_max = f_interval
+    # This delta_x is for the original step function f_h
+    f_delta_x = (f_x_max - f_x_min) / P_val 
+    
+    # The S_target for heights such that integral(f_h) = 1
+    # If delta_x is width of step, sum(h_i * delta_x) = 1 => sum(h_i) = 1/delta_x
+    # If interval length is L_interval = f_x_max - f_x_min, then delta_x = L_interval / P_val
+    # So sum(h_i) = P_val / L_interval.
+    # For L_interval = 0.5, sum(h_i) = P_val / 0.5 = 2 * P_val.
+    S_target_height_sum = P_val / (f_x_max - f_x_min) # General form
+    # For your standard [-0.25, 0.25] interval, length is 0.5, so S_target_height_sum = 2 * P_val.
+
+    def loss_function(log_h_params: torch.Tensor) -> torch.Tensor:
+        if log_h_params.shape[0] != P_val:
+            raise ValueError(f"Input log_h_params shape {log_h_params.shape} mismatch P_val {P_val}")
+
+        # 1. Derive heights h_i for f_h from log_h_params
+        #    Ensure they are non-negative and sum to S_target_height_sum (for integral f_h = 1)
+        heights_f_h = F.softmax(log_h_params, dim=0) * S_target_height_sum
+        # heights_f_h is now non-negative and sum(heights_f_h * f_delta_x) approx 1
+
+        # 2. Compute autoconvolution values A_m = (f_h * f_h)(t_m)
+        #    This returns a tensor of length 2P+1 representing A_0, A_1, ..., A_{2P}
+        autoconv_knot_values = compute_autoconvolution_values(
+            heights_f_h, 
+            f_delta_x, 
+            P_val
+        ) # Shape (2*P_val + 1)
+
+        # 3. Compute the L1 norm of the discrete differences (Total Variation)
+        #    Differences are A_1-A_0, A_2-A_1, ..., A_{2P}-A_{2P-1}
+        #    There are 2P such differences.
+        differences = autoconv_knot_values[1:] - autoconv_knot_values[:-1]
+        total_variation = torch.sum(torch.abs(differences))
+        
+        # The loss is the scaled total variation
+        loss = tv_lambda * total_variation
+        
+        # Optional: Combine with the max value if you want to minimize both
+        # max_A = torch.max(autoconv_knot_values) # Or autoconv_knot_values[1:-1].max()
+        # loss = max_A + tv_lambda * total_variation
+        
+        return loss
+
+    return loss_function
+
+def scale_invariant_h_squared_loss(P_val=600):
+    """
+    Computes the loss: (max (f_{h^2} * f_{h^2})) / (integral(f_{h^2}))^2
+    where f_{h^2} is a step function with heights h_i^2.
+    The input lambda h will take a tensor h of P_val parameters.
+    """
+    f_interval=(-0.25, 0.25)
+    f_x_min, f_x_max = f_interval
+    f_delta_x = (f_x_max - f_x_min) / P_val
+
+    def loss_function(h_params: torch.Tensor) -> torch.Tensor:
+        if h_params.shape[0] != P_val:
+            raise ValueError(f"Input h_params shape {h_params.shape} does not match P_val {P_val}")
+
+        # 1. Effective heights are h_i^2
+        # These are guaranteed non-negative.
+        effective_heights = h_params**2
+
+        # 2. Compute autoconvolution of f_{h^2}
+        # compute_autoconvolution_values expects non-negative heights.
+        autoconv_f_h_squared = compute_autoconvolution_values(
+            effective_heights, 
+            f_delta_x, 
+            P_val
+        )
+        max_autoconv = torch.max(autoconv_f_h_squared)
+
+        # 3. Compute integral of f_{h^2}
+        # compute_integral_of_step_function expects non-negative heights.
+        integral_f_h_squared = compute_integral_of_step_function(
+            effective_heights,
+            f_delta_x
+        )
+        
+        # Denominator is (integral_f_h_squared)^2
+        # Add a small epsilon to prevent division by zero if integral is exactly zero
+        # (e.g., if all h_params are zero).
+        denominator = integral_f_h_squared**2 + 1e-24 # Small epsilon for stability
+
+        # 4. Compute the ratio
+        loss_val = max_autoconv / denominator
+        
+        return loss_val
+
+    return loss_function
+
+def scale_invariant_h_loss(P_val=600):
+    """
+    Computes the loss: (max (f_{h^2} * f_{h^2})) / (integral(f_{h^2}))^2
+    where f_{h^2} is a step function with heights h_i^2.
+    The input lambda h will take a tensor h of P_val parameters.
+    """
+    f_interval=(-0.25, 0.25)
+    f_x_min, f_x_max = f_interval
+    f_delta_x = (f_x_max - f_x_min) / P_val
+
+    def loss_function(h_params: torch.Tensor) -> torch.Tensor:
+        if h_params.shape[0] != P_val:
+            raise ValueError(f"Input h_params shape {h_params.shape} does not match P_val {P_val}")
+
+        # 1. Effective heights are h_i^2
+        # These are guaranteed non-negative.
+        effective_heights = h_params
+
+        # 2. Compute autoconvolution of f_{h^2}
+        # compute_autoconvolution_values expects non-negative heights.
+        autoconv_f_h_squared = compute_autoconvolution_values(
+            effective_heights, 
+            f_delta_x, 
+            P_val
+        )
+        max_autoconv = torch.max(autoconv_f_h_squared)
+
+        # 3. Compute integral of f_{h^2}
+        # compute_integral_of_step_function expects non-negative heights.
+        integral_f_h_squared = compute_integral_of_step_function(
+            effective_heights,
+            f_delta_x
+        )
+        
+        # Denominator is (integral_f_h_squared)^2
+        # Add a small epsilon to prevent division by zero if integral is exactly zero
+        # (e.g., if all h_params are zero).
+        denominator = integral_f_h_squared**2 # Small epsilon for stability
+
+        # 4. Compute the ratio
+        loss_val = max_autoconv / denominator
+        
+        return loss_val
+
+    return loss_function
+
+
+
+def gaussian_pdf(x, mu, sigma_sq):
+    return (1.0 / torch.sqrt(2 * torch.pi * sigma_sq)) * \
+           torch.exp(-0.5 * (x - mu)**2 / sigma_sq)
+
+def gaussian_mixture_max_autoconv_loss_v2(
+    num_mixture_components: int,
+    fixed_sigma: float,
+    num_grid_points_autocorr: int,
+    f_interval_min: float = -0.25,
+    f_interval_max: float = 0.25,
+    mean_constraint_method: str = 'clamp', # 'clamp', 'tanh', 'sigmoid', 'penalty'
+    penalty_lambda: float = 10.0 # For 'penalty' method
+):
+    if fixed_sigma <= 0: raise ValueError("fixed_sigma must be positive.")
+    if num_mixture_components <= 0: raise ValueError("num_mixture_components must be positive.")
+    if num_grid_points_autocorr <= 1: raise ValueError("num_grid_points_autocorr must be at least 2.")
+    if mean_constraint_method not in ['clamp', 'tanh', 'sigmoid', 'penalty']:
+        raise ValueError("Invalid mean_constraint_method.")
+
+    K = num_mixture_components
+    sigma_val = torch.tensor(fixed_sigma, dtype=torch.float64) # Ensure double for consistency
+    sigma_sq_val = sigma_val**2
+
+    mu_lower_bound_val = f_interval_min + 3.0 * fixed_sigma
+    mu_upper_bound_val = f_interval_max - 3.0 * fixed_sigma
+
+    if mu_lower_bound_val > mu_upper_bound_val:
+        center_of_interval = (f_interval_min + f_interval_max) / 2.0
+        mu_lower_bound_val = center_of_interval
+        mu_upper_bound_val = center_of_interval
+        # print(f"Warning: Interval too narrow for 6*sigma. mu bounds set to center: {center_of_interval:.3f}")
+
+    t_grid_min = 2 * f_interval_min
+    t_grid_max = 2 * f_interval_max
+    
+    def loss_function(params: torch.Tensor) -> torch.Tensor:
+        if params.shape[0] != 2 * K:
+            raise ValueError(f"Input params shape {params.shape} incorrect. Expected {2*K}.")
+
+        log_weights_params = params[:K]
+        raw_means_params = params[K:] # These are the learnable $\beta_i$ for tanh/sigmoid, or direct means for clamp/penalty
+
+        weights = F.softmax(log_weights_params, dim=0)
+        dev = raw_means_params.device
+        dtype = params.dtype
+
+        # --- Derive means mu_i based on chosen method ---
+        derived_means = torch.zeros_like(raw_means_params)
+        mean_penalty = torch.tensor(0.0, device=dev, dtype=dtype)
+
+        if mean_constraint_method == 'clamp':
+            derived_means = torch.clamp(
+                raw_means_params, 
+                min=torch.tensor(mu_lower_bound_val, device=dev, dtype=dtype), 
+                max=torch.tensor(mu_upper_bound_val, device=dev, dtype=dtype)
+            )
+        elif mean_constraint_method == 'tanh':
+            # raw_means_params are the unconstrained $\beta_i$
+            a = torch.tensor(mu_lower_bound_val, device=dev, dtype=dtype)
+            b = torch.tensor(mu_upper_bound_val, device=dev, dtype=dtype)
+            if torch.isclose(a,b): # Handle case where bounds are identical
+                derived_means = torch.full_like(raw_means_params, a)
+            else:
+                derived_means = (a + b) / 2.0 + (b - a) / 2.0 * torch.tanh(raw_means_params)
+        elif mean_constraint_method == 'sigmoid':
+            # raw_means_params are the unconstrained $\beta_i$
+            a = torch.tensor(mu_lower_bound_val, device=dev, dtype=dtype)
+            b = torch.tensor(mu_upper_bound_val, device=dev, dtype=dtype)
+            if torch.isclose(a,b):
+                 derived_means = torch.full_like(raw_means_params, a)
+            else:
+                derived_means = a + (b - a) * torch.sigmoid(raw_means_params)
+        elif mean_constraint_method == 'penalty':
+            derived_means = raw_means_params # Use raw means directly
+            # Add quadratic penalty for violations
+            penalty_upper = torch.relu(derived_means - mu_upper_bound_val)**2
+            penalty_lower = torch.relu(mu_lower_bound_val - derived_means)**2
+            mean_penalty = penalty_lambda * torch.sum(penalty_upper + penalty_lower)
+        
+        # --- Autoconvolution Calculation ---
+        autoconv_variance = 2 * sigma_sq_val
+        t_grid = torch.linspace(t_grid_min, t_grid_max, steps=num_grid_points_autocorr, 
+                                device=dev, dtype=dtype)
+        t_grid = t_grid.view(-1, 1, 1)
+
+        w_i_exp = weights.view(1, K, 1)
+        w_j_exp = weights.view(1, 1, K)
+        mu_i_exp = derived_means.view(1, K, 1)
+        mu_j_exp = derived_means.view(1, 1, K)
+
+        pairwise_weights = w_i_exp * w_j_exp
+        pairwise_means = mu_i_exp + mu_j_exp
+        
+        pdf_values = gaussian_pdf(t_grid, pairwise_means, autoconv_variance)
+        weighted_pdf_values = pairwise_weights * pdf_values
+        autoconv_eval_on_grid = torch.sum(weighted_pdf_values, dim=(1, 2))
+        
+        max_autoconv_val = torch.max(autoconv_eval_on_grid)
+        
+        total_loss = max_autoconv_val + mean_penalty # Add penalty if applicable
+        
+        return total_loss
+
+    return loss_function
+
+
+def gaussian_mixture_max_autoconv_loss_v3_learnable_sigma(
+    num_mixture_components: int,    # K
+    num_grid_points_autocorr: int,  # N_grid
+    f_interval_min: float = -0.25,
+    f_interval_max: float = 0.25,
+    # Penalty lambdas:
+    lambda_sigma_upper_bound: float = 100.0, # Penalty for sigma_i being too large
+    lambda_mu_bounds: float = 100.0,         # Penalty for mu_i violating sigma-dependent bounds
+    # Initial sigma constraints (can be overriden by optimizer if penalty is low)
+    min_sigma_init_val: float = 1e-3,    # Smallest allowed sigma (via raw_log_sigma clamp)
+    max_sigma_init_val: float = (0.25 - (-0.25)) / 6.01 # Max sigma so 6*sigma almost fits interval
+):
+    if num_mixture_components <= 0: raise ValueError("num_mixture_components positive.")
+    if num_grid_points_autocorr <= 1: raise ValueError("num_grid_points_autocorr >= 2.")
+    if min_sigma_init_val <= 0 or max_sigma_init_val <=0 or min_sigma_init_val >= max_sigma_init_val:
+        raise ValueError("Invalid min/max_sigma_init_val.")
+
+    K = num_mixture_components
+    
+    # Max allowable sigma based on interval width (so 6*sigma can fit)
+    sigma_max_allowable_for_interval = (f_interval_max - f_interval_min) / 6.0
+    if sigma_max_allowable_for_interval <= 0: # Should not happen with valid interval
+        sigma_max_allowable_for_interval = min_sigma_init_val # Fallback
+
+    t_grid_min = 2 * f_interval_min
+    t_grid_max = 2 * f_interval_max
+    
+    def loss_function(params: torch.Tensor) -> torch.Tensor:
+        if params.shape[0] != 3 * K: # K for log_w, K for raw_mu, K for raw_log_sigma
+            raise ValueError(f"Input params shape {params.shape} incorrect. Expected {3*K}.")
+
+        log_weights_params = params[:K]
+        raw_means_params = params[K : 2*K]
+        raw_log_sigmas_params = params[2*K:]
+
+        dev = params.device
+        dtype = params.dtype
+
+        # 1. Derive weights w_i
+        weights_f = F.softmax(log_weights_params, dim=0) # Shape (K,)
+
+        # 2. Derive sigmas_f_i
+        # sigma_i = exp(raw_log_sigma_i). Clamp raw_log_sigma to prevent extreme sigma values.
+        # This initial clamping of raw_log_sigmas helps keep sigmas in a somewhat sane range
+        # before penalties kick in strongly.
+        clamped_raw_log_sigmas = torch.clamp(
+            raw_log_sigmas_params, 
+            min=torch.log(torch.tensor(min_sigma_init_val, device=dev, dtype=dtype)),
+            max=torch.log(torch.tensor(max_sigma_init_val, device=dev, dtype=dtype))
+        )
+        sigmas_f = torch.exp(clamped_raw_log_sigmas) # Shape (K,)
+        variances_f = sigmas_f**2                 # Shape (K,)
+
+        # 3. Derive means mu_f_i (these are "unclamped" for now, penalty handles bounds)
+        means_f = raw_means_params # Shape (K,)
+        # means_f = torch.clamp(means_f, min=f_interval_min+.1, max=f_interval_max-.1)
+        
+        # --- Calculate Penalties ---
+        total_penalty = torch.tensor(0.0, device=dev, dtype=dtype)
+
+        # Penalty for sigmas_f being too large for the interval
+        # (6*sigma_i should be <= interval_width)
+        penalty_sigma_too_large = torch.relu(sigmas_f - sigma_max_allowable_for_interval)
+        total_penalty += lambda_sigma_upper_bound * torch.sum(penalty_sigma_too_large)
+        
+        # Effective sigmas (after considering the penalty above, they might still be too large)
+        # For mu bounds, use the current sigmas_f
+        mu_lower_bounds_dynamic = f_interval_min + 3.5 * sigmas_f
+        mu_upper_bounds_dynamic = f_interval_max - 3.5 * sigmas_f
+
+        # Penalty for means_f being outside their dynamic sigma-dependent bounds
+        # Handle case where mu_lower_bound > mu_upper_bound (sigma is too large)
+        # In this case, any mu is "out of bounds". We want mu to be at the interval center.
+        interval_center = (f_interval_min + f_interval_max) / 2.0
+        
+        # Penalty for mu_i > mu_upper_bounds_dynamic OR if lower_bound > upper_bound (target center)
+        # means_f = torch.clamp(means_f, min=mu_lower_bounds_dynamic, max=mu_upper_bounds_dynamic)
+        penalty_mu_upper = torch.where(
+            mu_lower_bounds_dynamic > mu_upper_bounds_dynamic,
+            (means_f - interval_center)**2, # Penalize deviation from center if bounds are inverted
+            torch.relu(means_f - mu_upper_bounds_dynamic)
+        )
+        # Penalty for mu_i < mu_lower_bounds_dynamic OR if lower_bound > upper_bound (target center)
+        penalty_mu_lower = torch.where(
+            mu_lower_bounds_dynamic > mu_upper_bounds_dynamic,
+            torch.tensor(0.0, device=dev, dtype=dtype), # Covered by upper penalty's target of center
+            torch.relu(mu_lower_bounds_dynamic - means_f)
+        )
+        total_penalty += lambda_mu_bounds * torch.sum(penalty_mu_upper + penalty_mu_lower)
+
+        # --- Autoconvolution Calculation ---
+        # A(t) = sum_{i,j} w_i w_j N(t; mu_i+mu_j, sigma_i^2+sigma_j^2)
+        
+        # Pairwise parameters for A(t) components
+        w_i_exp = weights_f.view(K, 1)       # (K, 1)
+        w_j_exp = weights_f.view(1, K)       # (1, K)
+        pairwise_tilde_weights = w_i_exp * w_j_exp # (K, K)
+
+        mu_i_exp = means_f.view(K, 1)        # (K, 1)
+        mu_j_exp = means_f.view(1, K)        # (1, K)
+        pairwise_tilde_means = mu_i_exp + mu_j_exp # (K, K)
+        
+        var_i_exp = variances_f.view(K, 1)   # (K, 1)
+        var_j_exp = variances_f.view(1, K)   # (1, K)
+        pairwise_tilde_variances = var_i_exp + var_j_exp # (K, K)
+
+        # Reshape for broadcasting with t_grid
+        final_weights = pairwise_tilde_weights.view(1, K, K)
+        final_means = pairwise_tilde_means.view(1, K, K)
+        final_variances = pairwise_tilde_variances.view(1, K, K)
+        
+        t_grid = torch.linspace(t_grid_min, t_grid_max, steps=num_grid_points_autocorr, 
+                                device=dev, dtype=dtype)
+        t_grid = t_grid.view(-1, 1, 1) # (N_grid, 1, 1)
+        
+        pdf_values = gaussian_pdf(t_grid, final_means, final_variances) # (N_grid, K, K)
+        weighted_pdf_values = final_weights * pdf_values
+        autoconv_eval_on_grid = torch.sum(weighted_pdf_values, dim=(1, 2)) # (N_grid,)
+        
+        max_autoconv_val = torch.max(autoconv_eval_on_grid)
+        
+        total_loss = max_autoconv_val + total_penalty
+        
+        return total_loss
+
+    return loss_function
+
+
+
+# To inspect derived parameters after an optimization step:
+def inspect_params_v3(params, K, f_int_min, f_int_max, min_s_init, max_s_init):
+    log_w = params[:K].data
+    raw_m = params[K:2*K].data
+    raw_log_s = params[2*K:].data
+    w = F.softmax(log_w, dim=0)
+    cl_raw_log_s = torch.clamp(raw_log_s, min=np.log(min_s_init), max=np.log(max_s_init))
+    s = torch.exp(cl_raw_log_s)
+    m = raw_m # means are used directly, penalties enforce their bounds
+    print("Weights:", w.numpy())
+    print("Means (raw):", m.numpy())
+    print("Sigmas:", s.numpy())
+    mu_low_b = f_int_min + 3*s
+    mu_high_b = f_int_max - 3*s
+    print("Mu lower bounds dynamic:", mu_low_b.numpy())
+    print("Mu upper bounds dynamic:", mu_high_b.numpy())
+
+
+### helper function for optimizing over mean, variance, and weights ###
+def convert_gaussian_mixture_v3_to_step_function(
+    combined_params: torch.Tensor,    # Full parameter tensor (log_w, raw_mu, raw_log_sigma)
+    num_mixture_components: int,    # K
+    P_val_step_func: int,           # P - Number of pieces for the output step function
+    S_target_step_func: float,      # Target sum for the step function heights
+    f_interval_min: float = -0.25,
+    f_interval_max: float = 0.25,
+    # These sigma init bounds are used to reconstruct sigma as done in the loss
+    min_sigma_init_val: float = 1e-3, 
+    max_sigma_init_val: float = (0.25 - (-0.25)) / 6.01 
+) -> torch.Tensor:
+    """
+    Converts parameters of a Gaussian mixture (with learnable sigmas)
+    into a discretized step function.
+
+    Args:
+        combined_params: Optimized parameters (log_weights, raw_means, raw_log_sigmas).
+        num_mixture_components (K): Number of Gaussians in the mixture.
+        P_val_step_func (P): Number of pieces for the output step function.
+        S_target_step_func: Target sum for the output step function heights.
+        f_interval_min: Min x for the support of the step function.
+        f_interval_max: Max x for the support of the step function.
+        min_sigma_init_val: Min sigma used for clamping log_sigma in loss.
+        max_sigma_init_val: Max sigma used for clamping log_sigma in loss.
+
+    Returns:
+        torch.Tensor: Heights of the discretized step function (P_val_step_func,).
+    """
+    K = num_mixture_components
+    if combined_params.shape[0] != 3 * K:
+        raise ValueError(f"Shape of combined_params ({combined_params.shape[0]}) incorrect for K={K}.")
+    if P_val_step_func <= 0:
+        raise ValueError("P_val_step_func must be positive.")
+
+    # Detach params as we are only evaluating
+    params_data = combined_params.detach()
+    dev = params_data.device
+    dtype = params_data.dtype
+
+    log_weights_params = params_data[:K]
+    raw_means_params = params_data[K : 2*K]
+    raw_log_sigmas_params = params_data[2*K:]
+
+    # 1. Derive weights w_i
+    weights = F.softmax(log_weights_params, dim=0)
+
+    # 2. Derive sigmas_f_i (consistent with loss_v3)
+    clamped_raw_log_sigmas = torch.clamp(
+        raw_log_sigmas_params,
+        min=torch.log(torch.tensor(min_sigma_init_val, device=dev, dtype=dtype)),
+        max=torch.log(torch.tensor(max_sigma_init_val, device=dev, dtype=dtype))
+    )
+    sigmas_f = torch.exp(clamped_raw_log_sigmas)
+    variances_f = sigmas_f**2
+
+    # 3. Derive means mu_f_i (raw means, as penalties handle bounds in loss_v3)
+    # For sampling the PDF, we should use these potentially "out-of-bounds" means
+    # if the penalty method was used, as that's what the optimizer "saw".
+    # Or, if we want to strictly represent the "intended" PDF within bounds,
+    # we could re-apply clamping here. Let's use raw means for now, assuming
+    # penalties kept them reasonable or optimizer found a good balance.
+    # If strict adherence to mu_i +- 3sigma_i inside interval is needed for the *sampled* PDF,
+    # then clamping should be applied here too.
+    # For now, using raw_means_params as the 'means_f' for PDF construction.
+    means_f = raw_means_params
+    
+    # --- Optional: Re-apply the mu-clamping based on derived sigmas if strictness desired for PDF ---
+    # This makes the sampled PDF adhere to the 3-sigma rule more strictly if penalties weren't perfect.
+    # mu_lower_bounds_dynamic = f_interval_min + 3.0 * sigmas_f
+    # mu_upper_bounds_dynamic = f_interval_max - 3.0 * sigmas_f
+    # temp_means_f = means_f.clone()
+    # for i in range(K):
+    #     if mu_lower_bounds_dynamic[i] > mu_upper_bounds_dynamic[i]:
+    #         center = (f_interval_min + f_interval_max) / 2.0
+    #         temp_means_f[i] = torch.tensor(center, device=dev, dtype=dtype)
+    #     else:
+    #         temp_means_f[i] = torch.clamp(means_f[i], 
+    #                                       min=mu_lower_bounds_dynamic[i], 
+    #                                       max=mu_upper_bounds_dynamic[i])
+    # means_f = temp_means_f
+    # --- End Optional mu-clamping for sampling ---
+
+
+    # 4. Define grid for sampling the continuous PDF f_h(x)
+    # delta_x_step = (f_interval_max - f_interval_min) / P_val_step_func # Not needed for sum calc later
+    step_edges = torch.linspace(f_interval_min, f_interval_max,
+                                P_val_step_func + 1,
+                                device=dev, dtype=dtype)
+    x_sample_points = (step_edges[:-1] + step_edges[1:]) / 2.0
+
+    # 5. Evaluate the continuous Gaussian mixture PDF f_h(x) at x_sample_points
+    x_sample_points_exp = x_sample_points.view(-1, 1)  # (P_step, 1)
+    means_f_exp = means_f.view(1, -1)                  # (1, K)
+    weights_exp = weights.view(1, -1)                  # (1, K)
+    variances_f_exp = variances_f.view(1, -1)          # (1, K)
+
+    individual_gaussian_pdfs = gaussian_pdf(x_sample_points_exp, means_f_exp, variances_f_exp)
+    step_function_raw_heights = torch.sum(weights_exp * individual_gaussian_pdfs, dim=1)
+
+    # 6. Normalize these sampled heights to sum to S_target_step_func
+    current_sum_of_raw_heights = torch.sum(step_function_raw_heights)
+    
+    if current_sum_of_raw_heights.abs().item() > 1e-9:
+        step_function_heights = (S_target_step_func / current_sum_of_raw_heights) * step_function_raw_heights
+    else:
+        print("Warning: Sampled Gaussian mixture (v3) summed to near zero. Resulting step function is uniform.")
+        step_function_heights = torch.full((P_val_step_func,),
+                                           S_target_step_func / P_val_step_func,
+                                           device=dev, dtype=dtype)
+
+    step_function_heights = torch.clamp(step_function_heights, min=0.0) # Ensure non-negativity
+    
+    return step_function_heights
+###### Helper ffunction for tanh version of mean constraint ###
+def get_derived_mixture_parameters(
+    combined_params: torch.Tensor,
+    num_mixture_components: int, # K
+    fixed_sigma: float,          # c
+    mean_constraint_method: str,
+    f_interval_min: float = -0.25,
+    f_interval_max: float = 0.25
+):
+    """
+    Extracts weights and derived (e.g., clamped/squashed) means
+    from the combined parameter tensor.
+    """
+    K = num_mixture_components
+    if combined_params.shape[0] != 2 * K:
+        raise ValueError("Shape of combined_params is incorrect.")
+
+    log_weights_params = combined_params[:K]
+    raw_means_params = combined_params[K:] # These are betas for tanh/sigmoid
+
+    # Derive weights
+    # weights = F.softmax(log_weights_params, dim=0)
+
+    # Calculate bounds for means
+    mu_lower_bound_val = f_interval_min + 3.0 * fixed_sigma
+    mu_upper_bound_val = f_interval_max - 3.0 * fixed_sigma
+    if mu_lower_bound_val > mu_upper_bound_val:
+        center_of_interval = (f_interval_min + f_interval_max) / 2.0
+        mu_lower_bound_val = center_of_interval
+        mu_upper_bound_val = center_of_interval
+    
+    dev = raw_means_params.device
+    dtype = combined_params.dtype
+    a = torch.tensor(mu_lower_bound_val, device=dev, dtype=dtype)
+    b = torch.tensor(mu_upper_bound_val, device=dev, dtype=dtype)
+
+    # Derive means
+    derived_means = torch.zeros_like(raw_means_params)
+    if mean_constraint_method == 'clamp':
+        derived_means = torch.clamp(raw_means_params, min=a, max=b)
+    elif mean_constraint_method == 'tanh':
+        if torch.isclose(a,b):
+            derived_means = torch.full_like(raw_means_params, a)
+        else:
+            derived_means = (a + b) / 2.0 + (b - a) / 2.0 * torch.tanh(raw_means_params)
+    elif mean_constraint_method == 'sigmoid':
+        if torch.isclose(a,b):
+            derived_means = torch.full_like(raw_means_params, a)
+        else:
+            derived_means = a + (b - a) * torch.sigmoid(raw_means_params)
+    elif mean_constraint_method == 'penalty':
+        derived_means = raw_means_params # For penalty, derived means are the raw ones
+    else:
+        raise ValueError(f"Unknown mean_constraint_method: {mean_constraint_method}")
+        
+    return log_weights_params, derived_means
+
+def sobolev_bound_inspired_loss(
+    num_mixture_components: int,    # K
+    fixed_sigma: float,             # c
+    lambda_derivative_term: float = 1.0, # Weight for ||A'||^2 term
+    f_interval_min: float = -0.25,
+    f_interval_max: float = 0.25,
+    mean_constraint_method: str = 'tanh',
+    penalty_lambda: float = 10.0 # For 'penalty' mean constraint method
+):
+    if fixed_sigma <= 0: raise ValueError("fixed_sigma must be positive.")
+    if num_mixture_components <= 0: raise ValueError("num_mixture_components positive.")
+    if lambda_derivative_term < 0: raise ValueError("lambda_derivative_term non-negative.")
+
+    K = num_mixture_components
+    # sigma_val is for f_h. Variance in f_h is sigma_val**2.
+    sigma_f_sq = torch.tensor(fixed_sigma**2, dtype=torch.float64) 
+    
+    # Autoconvolution A(t) is a mixture of K*K Gaussians.
+    # Each component N(t; mu_i+mu_j, sigma_i^2+sigma_j^2)
+    # Here, sigma_i^2 = sigma_j^2 = sigma_f_sq.
+    # So, variance of components in A(t) is sigma_A_sq = 2 * sigma_f_sq.
+    sigma_A_sq = 2 * sigma_f_sq
+
+    # Pre-calculate constant for integral of N_k * N_l
+    # Denominator for N_k N_l integral: sqrt(2*pi*(sigma_A_sq + sigma_A_sq)) = sqrt(2*pi*2*sigma_A_sq)
+    # = sqrt(4*pi*sigma_A_sq) = 2 * sqrt(pi * sigma_A_sq)
+    # sigma_A_sq = 2*sigma_f_sq => 2 * sqrt(2*pi*sigma_f_sq) = 2 * fixed_sigma * sqrt(2*pi)
+    const_factor_integral_Nk_Nl = 1.0 / (2 * fixed_sigma * torch.sqrt(torch.tensor(2.0 * torch.pi, dtype=torch.float64)))
+
+    # Bounds for mu_i of f_h
+    mu_lower_bound_val = f_interval_min + 3.0 * fixed_sigma
+    mu_upper_bound_val = f_interval_max - 3.0 * fixed_sigma
+    if mu_lower_bound_val > mu_upper_bound_val:
+        center_of_interval = (f_interval_min + f_interval_max) / 2.0
+        mu_lower_bound_val = center_of_interval
+        mu_upper_bound_val = center_of_interval
+        
+    def loss_function(params: torch.Tensor) -> torch.Tensor:
+        if params.shape[0] != 2 * K:
+            raise ValueError(f"Input params shape {params.shape} incorrect. Expected {2*K}.")
+
+        log_weights_params = params[:K]
+        raw_means_params = params[K:] # These are betas for tanh/sigmoid etc.
+
+        weights_f = F.softmax(log_weights_params, dim=0) # Weights w_i for f_h, shape (K,)
+        dev = raw_means_params.device
+        dtype = params.dtype
+        
+        _sigma_A_sq = sigma_A_sq.to(device=dev, dtype=dtype) # Ensure device/dtype
+        _const_factor_integral_Nk_Nl = const_factor_integral_Nk_Nl.to(device=dev, dtype=dtype)
+
+
+        # --- Derive means mu_i for f_h ---
+        derived_means_f = torch.zeros_like(raw_means_params)
+        mean_penalty = torch.tensor(0.0, device=dev, dtype=dtype)
+        # (Copied logic for deriving means based on method)
+        if mean_constraint_method == 'clamp':
+            derived_means_f = torch.clamp(raw_means_params, min=torch.tensor(mu_lower_bound_val, device=dev, dtype=dtype), max=torch.tensor(mu_upper_bound_val, device=dev, dtype=dtype))
+        elif mean_constraint_method == 'tanh':
+            a = torch.tensor(mu_lower_bound_val, device=dev, dtype=dtype); b = torch.tensor(mu_upper_bound_val, device=dev, dtype=dtype)
+            if torch.isclose(a,b): derived_means_f = torch.full_like(raw_means_params, a)
+            else: derived_means_f = (a + b) / 2.0 + (b - a) / 2.0 * torch.tanh(raw_means_params)
+        elif mean_constraint_method == 'sigmoid':
+            a = torch.tensor(mu_lower_bound_val, device=dev, dtype=dtype); b = torch.tensor(mu_upper_bound_val, device=dev, dtype=dtype)
+            if torch.isclose(a,b): derived_means_f = torch.full_like(raw_means_params, a)
+            else: derived_means_f = a + (b - a) * torch.sigmoid(raw_means_params)
+        elif mean_constraint_method == 'penalty':
+            derived_means_f = raw_means_params
+            penalty_upper = torch.relu(derived_means_f - mu_upper_bound_val)**2
+            penalty_lower = torch.relu(mu_lower_bound_val - derived_means_f)**2
+            mean_penalty = penalty_lambda * torch.sum(penalty_upper + penalty_lower)
+        
+        # --- Parameters for A(t) = sum_{i,j} w_i w_j N(t; mu_i+mu_j, 2*sigma_f_sq) ---
+        # Create KxK matrices for pairwise terms
+        w_i_exp = weights_f.view(K, 1)       # (K, 1)
+        w_j_exp = weights_f.view(1, K)       # (1, K)
+        mu_i_exp = derived_means_f.view(K, 1)  # (K, 1)
+        mu_j_exp = derived_means_f.view(1, K)  # (1, K)
+
+        tilde_weights_kl = w_i_exp * w_j_exp       # (K, K), element (k,l) is w_k w_l
+        tilde_means_kl = mu_i_exp + mu_j_exp         # (K, K), element (k,l) is mu_k + mu_l
+        # tilde_sigma_sq_kl is constant sigma_A_sq for all pairs
+
+        # --- Calculate ||A||_2^2 ---
+        # ||A||_2^2 = sum_{k,l} sum_{p,q} (w_k w_l)(w_p w_q) * Integral( N_{kl}(t) N_{pq}(t) dt )
+        # This is a sum over (K^2)^2 = K^4 terms.
+        # N_{kl}(t) is N(t; mu_k+mu_l, sigma_A_sq)
+        
+        # Flatten tilde_weights and tilde_means for easier iteration if K is small
+        # For larger K, keep as matrices to use broadcasting
+        flat_tilde_weights = tilde_weights_kl.flatten() # K^2 elements
+        flat_tilde_means = tilde_means_kl.flatten()     # K^2 elements
+        M = K*K # Number of components in A(t)
+
+        L2_A_sq = torch.tensor(0.0, device=dev, dtype=dtype)
+        for k_idx in range(M): # iterate over K^2 components of A(t)
+            for l_idx in range(M): # iterate over K^2 components of A(t)
+                wk_tilde = flat_tilde_weights[k_idx]
+                wl_tilde = flat_tilde_weights[l_idx]
+                muk_tilde = flat_tilde_means[k_idx]
+                mul_tilde = flat_tilde_means[l_idx]
+                
+                # Integral( N(t; muk, sigma_A_sq) * N(t; mul, sigma_A_sq) dt )
+                # = const_factor * exp( -(muk-mul)^2 / (2 * (sigma_A_sq + sigma_A_sq)) )
+                # = const_factor * exp( -(muk-mul)^2 / (4 * sigma_A_sq) )
+                # sigma_A_sq = 2*sigma_f_sq
+                # So exponent is -(muk-mul)^2 / (8 * sigma_f_sq)
+                exp_term_val = torch.exp(-(muk_tilde - mul_tilde)**2 / (4 * _sigma_A_sq)) # Denom 2*(var_A+var_A) = 4*var_A
+                integral_prod_Nk_Nl = _const_factor_integral_Nk_Nl * exp_term_val
+                
+                L2_A_sq += wk_tilde * wl_tilde * integral_prod_Nk_Nl
+        
+        # --- Calculate ||A'||_2^2 ---
+        # ||A'||_2^2 = sum_{k,l} sum_{p,q} (w_k w_l)(w_p w_q) * Integral( N'_{kl}(t) N'_{pq}(t) dt )
+        L2_A_prime_sq = torch.tensor(0.0, device=dev, dtype=dtype)
+        for k_idx in range(M):
+            for l_idx in range(M):
+                wk_tilde = flat_tilde_weights[k_idx]
+                wl_tilde = flat_tilde_weights[l_idx]
+                muk_tilde = flat_tilde_means[k_idx]
+                mul_tilde = flat_tilde_means[l_idx]
+
+                # Integral( N'(t; muk, sigma_A_sq) * N'(t; mul, sigma_A_sq) dt )
+                # = ( (1 / (2*sigma_A_sq)) - (muk-mul)^2 / ((2*sigma_A_sq)^2) ) * Integral(N_k N_l dt)
+                # sigma_A_sq + sigma_A_sq = 2 * sigma_A_sq
+                term1_factor = 1.0 / (2 * _sigma_A_sq) 
+                term2_factor_num = (muk_tilde - mul_tilde)**2
+                term2_factor_den = (2 * _sigma_A_sq)**2
+                
+                exp_term_val_for_int_prod = torch.exp(-(muk_tilde - mul_tilde)**2 / (4 * _sigma_A_sq))
+                integral_prod_Nk_Nl_val = _const_factor_integral_Nk_Nl * exp_term_val_for_int_prod
+
+                factor_for_deriv_integral = term1_factor - term2_factor_num / torch.clamp(term2_factor_den, min=1e-24)
+                integral_prod_Nkprime_Nlprime = factor_for_deriv_integral * integral_prod_Nk_Nl_val
+                
+                L2_A_prime_sq += wk_tilde * wl_tilde * integral_prod_Nkprime_Nlprime
+        
+        total_loss = L2_A_sq + lambda_derivative_term * L2_A_prime_sq + mean_penalty
+        
+        return total_loss
+
+    return loss_function
 ###
 
 
@@ -939,8 +1838,8 @@ def test_K_m_construction(P_val_test=3):
             f"Mismatch for m={m_orig_idx}! Direct: {val_direct}, From K: {val_from_K}"
     
     print("K_m construction test passed for all m.")
-
-test_K_m_construction(P_val_test=1000)
+#
+# test_K_m_construction(P_val_test=1000)
 # You would need to have compute_autoconvolution_values defined from your utils.
 # test_K_m_construction(P_val_test=3)
 # test_K_m_construction(P_val_test=4)
