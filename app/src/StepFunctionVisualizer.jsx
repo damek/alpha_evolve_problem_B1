@@ -79,10 +79,11 @@ const StepFunctionVisualizer = () => {
     stepFunction: []
   });
   
-  // Initialize step function on component mount or when number of pieces changes
-  useEffect(() => {
-    generateRandomStepFunction();
-  }, [numPieces]);
+  // Move these up before the functions are defined
+  const [isInitialized, setIsInitialized] = useState(false);
+  const [lastManualPiecesChange, setLastManualPiecesChange] = useState(0);
+  
+  // We'll add the initialization effect after all the functions are defined
   
   // Update max autoconvolution value when autoconvolution changes
   useEffect(() => {
@@ -92,9 +93,12 @@ const StepFunctionVisualizer = () => {
     }
   }, [autoconvolution]);
   
-  // Calculate autoconvolution
-  const calculateAutoconvolution = useCallback((steps) => {
-    const P = numPieces;
+  // Define calculation functions separately to avoid circular dependencies
+  
+  // Calculate autoconvolution without dependencies on React state
+  const calculateAutoconvolutionData = (steps) => {
+    // Use the actual number of steps
+    const P = steps.length;
     const heights = steps.map(step => step.y);
     const result = [];
     
@@ -129,24 +133,29 @@ const StepFunctionVisualizer = () => {
       });
     }
     
+    return result;
+  };
+  
+  // Calculate total height
+  const calculateTotalHeight = (steps) => {
+    return steps.reduce((acc, step) => acc + step.y, 0);
+  };
+  
+  // Wrapper function that updates state
+  const calculateAutoconvolution = useCallback((steps) => {
+    const result = calculateAutoconvolutionData(steps);
     setAutoconvolution(result);
-  }, [numPieces]);
+  }, []);
   
   // Update total height
   const updateTotalHeight = useCallback((steps) => {
-    const sum = steps.reduce((acc, step) => acc + step.y, 0);
+    const sum = calculateTotalHeight(steps);
     setTotalHeight(sum);
   }, []);
   
-  // Function to load predefined solutions
-  const loadPredefinedSolution = useCallback((type) => {
-    const heights = type === 'google' ? GOOGLE_SOLUTION : MATOLCSI_VINUESA_SOLUTION;
+  // Define function to create a step function from heights
+  const createStepFunction = (heights) => {
     const pieces = heights.length;
-    
-    // Set the number of pieces to match the solution
-    setNumPieces(pieces);
-    
-    // Create the step function
     const pieceWidth = (MAX_X - MIN_X) / pieces;
     let newStepFunction = [];
     
@@ -160,38 +169,50 @@ const StepFunctionVisualizer = () => {
       });
     }
     
+    return newStepFunction;
+  };
+
+  // Function to load predefined solutions
+  const loadPredefinedSolution = useCallback((type) => {
+    const heights = type === 'google' ? GOOGLE_SOLUTION : MATOLCSI_VINUESA_SOLUTION;
+    const newStepFunction = createStepFunction(heights);
+    
+    // Update everything at once
     setStepFunction(newStepFunction);
     setSelectedPiece(null);
     setCurrentHeight(0);
+    setNumPieces(heights.length);
     
-    calculateAutoconvolution(newStepFunction);
-    updateTotalHeight(newStepFunction);
-  }, [calculateAutoconvolution, updateTotalHeight]);
+    // Calculate derived values
+    const result = calculateAutoconvolutionData(newStepFunction);
+    setAutoconvolution(result);
+    setTotalHeight(calculateTotalHeight(newStepFunction));
+  }, []);
   
   // Generate random step function
   const generateRandomStepFunction = useCallback(() => {
-    const pieceWidth = (MAX_X - MIN_X) / numPieces;
-    let newStepFunction = [];
+    const pieces = numPieces; // Use current number of pieces
+    const pieceWidth = (MAX_X - MIN_X) / pieces;
+    let heights = [];
     
-    for (let i = 0; i < numPieces; i++) {
-      const x = MIN_X + (i + 0.5) * pieceWidth;
-      const height = Math.random() * (MAX_HEIGHT / 5); // Using MAX_HEIGHT/5 for initial values to leave room for adjustment
-      
-      newStepFunction.push({
-        x,
-        y: height,
-        pieceIndex: i,
-        width: pieceWidth
-      });
+    // Generate random heights
+    for (let i = 0; i < pieces; i++) {
+      heights.push(Math.random() * (MAX_HEIGHT / 5)); // Using MAX_HEIGHT/5 for initial values to leave room for adjustment
     }
     
+    // Create step function
+    const newStepFunction = createStepFunction(heights);
+    
+    // Update state
     setStepFunction(newStepFunction);
     setSelectedPiece(null);
     setCurrentHeight(0);
     
-    calculateAutoconvolution(newStepFunction);
-    updateTotalHeight(newStepFunction);
-  }, [numPieces, calculateAutoconvolution, updateTotalHeight]);
+    // Calculate derived values
+    const result = calculateAutoconvolutionData(newStepFunction);
+    setAutoconvolution(result);
+    setTotalHeight(calculateTotalHeight(newStepFunction));
+  }, [numPieces]);
   
   // Handle piece selection
   const handlePieceClick = useCallback((index) => {
@@ -229,12 +250,13 @@ const StepFunctionVisualizer = () => {
       };
       
       // Calculate autoconvolution immediately for real-time feedback
-      calculateAutoconvolution(updated);
-      updateTotalHeight(updated);
+      const result = calculateAutoconvolutionData(updated);
+      setAutoconvolution(result);
+      setTotalHeight(calculateTotalHeight(updated));
       
       return updated;
     });
-  }, [selectedPiece, calculateAutoconvolution, updateTotalHeight]);
+  }, [selectedPiece]);
   
   // Handle drag start
   const handleDragStart = useCallback((event, index) => {
@@ -272,8 +294,9 @@ const StepFunctionVisualizer = () => {
         };
         
         // Calculate autoconvolution immediately for real-time feedback
-        calculateAutoconvolution(updated);
-        updateTotalHeight(updated);
+        const result = calculateAutoconvolutionData(updated);
+        setAutoconvolution(result);
+        setTotalHeight(calculateTotalHeight(updated));
         
         return updated;
       });
@@ -290,7 +313,7 @@ const StepFunctionVisualizer = () => {
     // Add event listeners
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
-  }, [selectedPiece, currentHeight, handleHeightChange, handlePieceClick]);
+  }, [selectedPiece, currentHeight, handlePieceClick]);
   
   // Custom bar chart component
   const CustomBarChart = () => {
@@ -417,6 +440,21 @@ const StepFunctionVisualizer = () => {
     );
   };
   
+  // Add the initialization effect now that all functions are defined
+  useEffect(() => {
+    if (!isInitialized) {
+      setIsInitialized(true);
+      generateRandomStepFunction();
+    }
+  }, [isInitialized, generateRandomStepFunction]);
+  
+  // Effect to update when slider changes
+  useEffect(() => {
+    if (lastManualPiecesChange > 0) {
+      generateRandomStepFunction();
+    }
+  }, [lastManualPiecesChange, generateRandomStepFunction]);
+
   return (
     <div className="flex flex-col p-4 space-y-4 max-w-5xl mx-auto">
       <div className="text-2xl font-bold text-center">Step Function Autoconvolution</div>
@@ -434,7 +472,12 @@ const StepFunctionVisualizer = () => {
                   min="5"
                   max={MAX_PIECES}
                   value={numPieces}
-                  onChange={(e) => setNumPieces(Number(e.target.value))}
+                  onChange={(e) => {
+                    // Update the number of pieces
+                    setNumPieces(Number(e.target.value));
+                    // Track that this was a manual change
+                    setLastManualPiecesChange(Date.now());
+                  }}
                   className="w-full slider-thumb-orange"
                   style={{
                     background: `linear-gradient(to right, #8884d8 0%, #8884d8 ${(numPieces / MAX_PIECES) * 100}%, #e5e7eb ${(numPieces / MAX_PIECES) * 100}%, #e5e7eb 100%)`
