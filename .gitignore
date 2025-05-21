@@ -1,3 +1,9 @@
 __pycache__
 test.ipynb
 interactive.ipynb
+app_testing
+.DS_Store
+
+# Keep autoconvolution but ignore node_modules and dist
+autoconvolution/node_modules/
+autoconvolution/dist/
