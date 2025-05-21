@@ -762,10 +762,11 @@ const StepFunctionVisualizer = () => {
   
   // Effect to update when slider changes
   useEffect(() => {
-    if (lastManualPiecesChange > 0) {
+    if (lastManualPiecesChange > 0 && currentConfig === 'random') {
+      // Prevent this effect from running for predefined solutions
       generateRandomStepFunction();
     }
-  }, [lastManualPiecesChange, generateRandomStepFunction]);
+  }, [lastManualPiecesChange, generateRandomStepFunction, currentConfig]);
 
   // Notification Component
   const Notification = () => {
@@ -798,20 +799,31 @@ const StepFunctionVisualizer = () => {
           {/* Left column - Sliders */}
           <div className="flex flex-col space-y-6">
             <div>
-              <div className="mb-2 font-medium">Number of Pieces: {numPieces}</div>
+              <div className="mb-2 font-medium flex justify-between">
+                <span>Number of Pieces: {numPieces}</span>
+                {currentConfig !== 'random' && (
+                  <span className="text-xs text-gray-500 italic">
+                    (Fixed for {currentConfig === 'google' ? 'Google' : currentConfig === 'matolcsi' ? 'MV' : 'Smooth'} solution)
+                  </span>
+                )}
+              </div>
               <div className="relative w-full">
                 <input
                   type="range"
                   min="5"
                   max={MAX_PIECES}
                   value={numPieces}
+                  disabled={currentConfig !== 'random'}
                   onChange={(e) => {
+                    // Only process changes if in random mode
+                    if (currentConfig !== 'random') return;
+                    
                     // Update the number of pieces
                     setNumPieces(Number(e.target.value));
                     // Track that this was a manual change
                     setLastManualPiecesChange(Date.now());
                   }}
-                  className="w-full slider-thumb-orange"
+                  className={`w-full ${currentConfig === 'random' ? 'slider-thumb-orange' : 'opacity-60 cursor-not-allowed'}`}
                   style={{
                     background: `linear-gradient(to right, #8884d8 0%, #8884d8 ${(numPieces / MAX_PIECES) * 100}%, #e5e7eb ${(numPieces / MAX_PIECES) * 100}%, #e5e7eb 100%)`
                   }}
