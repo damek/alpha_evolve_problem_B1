@@ -126,8 +126,16 @@ const StepFunctionVisualizer = () => {
     
     // Calculate integral of f(x): (1/2P) * sum of heights
     const pieceWidth = 1/(2*P); // Width of each piece is (MAX_X - MIN_X)/P = 0.5/P = 1/(2P)
-    const integral = pieceWidth * heights.reduce((acc, h) => acc + h, 0);
-    const integralSquared = integral * integral;
+    const heightsSum = heights.reduce((acc, h) => acc + h, 0);
+    const integral = pieceWidth * heightsSum;
+    
+    // Avoid division by zero or very small numbers
+    const integralSquared = Math.max(integral * integral, 1e-10);
+    
+    // For debugging purposes - log values when they might cause issues
+    if (integral < 1e-6 || heightsSum === 0) {
+      console.warn(`Potential calculation issue: P=${P}, integral=${integral}, heightsSum=${heightsSum}`);
+    }
     
     // Calculate over a wider range for visualization
     for (let m = 0; m <= 2 * P; m++) {
@@ -146,7 +154,14 @@ const StepFunctionVisualizer = () => {
         }
         
         // Multiply by piece width and divide by integral squared to normalize properly
+        // Ensure we don't divide by zero or very small numbers
         value = (pieceWidth * value) / integralSquared;
+        
+        // Cap the value to a reasonable range to prevent NaN or Infinity
+        if (!isFinite(value) || isNaN(value)) {
+          console.warn(`Invalid value calculated: ${value} at t=${t}`);
+          value = 0;
+        }
       }
       
       result.push({
@@ -284,9 +299,21 @@ const StepFunctionVisualizer = () => {
     const pieceWidth = (MAX_X - MIN_X) / pieces;
     let heights = [];
     
-    // Generate random heights
+    // Generate random heights - ensure at least some have non-zero values
+    let nonZeroCount = 0;
     for (let i = 0; i < pieces; i++) {
-      heights.push(Math.random() * (MAX_HEIGHT / 5)); // Using MAX_HEIGHT/5 for initial values to leave room for adjustment
+      // Using MAX_HEIGHT/5 for initial values to leave room for adjustment
+      // Add a minimum value to avoid all-zero heights
+      const height = 0.1 + Math.random() * (MAX_HEIGHT / 5 - 0.1);
+      heights.push(height);
+      if (height > 0.05) nonZeroCount++;
+    }
+    
+    // If by chance we didn't get enough non-zero heights, ensure we have at least some
+    if (nonZeroCount < Math.min(5, pieces)) {
+      for (let i = 0; i < Math.min(5, pieces); i++) {
+        heights[i] = 0.5 + Math.random() * 3; // Ensure some decent heights
+      }
     }
     
     // Create step function
