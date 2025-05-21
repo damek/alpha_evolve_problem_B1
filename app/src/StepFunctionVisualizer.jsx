@@ -281,6 +281,7 @@ const StepFunctionVisualizer = () => {
                       y={y}
                       width={width}
                       height={height}
+                      data-index={index}
                       fill={selectedPiece === index ? "#ff7300" : "#8884d8"}
                       cursor={selectedPiece === index ? 'ns-resize' : 'pointer'}
                       pointerEvents="none" // Let the invisible rectangle handle events
@@ -346,14 +347,19 @@ const StepFunctionVisualizer = () => {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <div className="mb-2">Number of Pieces: {numPieces}</div>
-            <input
-              type="range"
-              min="5"
-              max={MAX_PIECES}
-              value={numPieces}
-              onChange={(e) => setNumPieces(Number(e.target.value))}
-              className="w-full"
-            />
+            <div className="relative w-full">
+              <input
+                type="range"
+                min="5"
+                max={MAX_PIECES}
+                value={numPieces}
+                onChange={(e) => setNumPieces(Number(e.target.value))}
+                className="w-full slider-thumb-orange"
+                style={{
+                  background: `linear-gradient(to right, #8884d8 0%, #8884d8 ${(numPieces / MAX_PIECES) * 100}%, #e5e7eb ${(numPieces / MAX_PIECES) * 100}%, #e5e7eb 100%)`
+                }}
+              />
+            </div>
           </div>
           
           <div>
@@ -390,25 +396,45 @@ const StepFunctionVisualizer = () => {
                   // For smooth updates during dragging the slider
                   const newHeight = Number(e.target.value);
                   if (selectedPiece !== null) {
-                    // Update current height
-                    setCurrentHeight(newHeight);
+                    // Update current height directly
+                    const newValue = newHeight;
+                    setCurrentHeight(newValue);
                     
-                    // Update step function directly without triggering a React re-render
-                    const updated = [...stepFunction];
-                    updated[selectedPiece] = {
-                      ...updated[selectedPiece],
-                      y: newHeight
+                    // Use a more direct approach to avoid re-renders
+                    // This mimics what we do in the drag handler
+                    const updatedStepFunction = [...stepFunction];
+                    updatedStepFunction[selectedPiece] = {
+                      ...updatedStepFunction[selectedPiece],
+                      y: newValue
                     };
                     
+                    // Update without triggering multiple re-renders
+                    stateRef.current.stepFunction = updatedStepFunction;
+                    
+                    // We're not manipulating the DOM directly now, as it was causing issues
+                    
                     // Calculate autoconvolution directly
-                    stateRef.current.stepFunction = updated;
-                    calculateAutoconvolution(updated);
-                    updateTotalHeight(updated);
+                    calculateAutoconvolution(updatedStepFunction);
+                    updateTotalHeight(updatedStepFunction);
+                    
+                    // Don't update state to avoid re-renders
+                    // setStepFunction(updatedStepFunction);
                   }
                 }}
                 onChange={(e) => {
                   // Final update when the slider is released
-                  handleHeightChange(Number(e.target.value));
+                  const newHeight = Number(e.target.value);
+                  if (selectedPiece !== null) {
+                    // Update step function state at the end
+                    setStepFunction(prev => {
+                      const updated = [...prev];
+                      updated[selectedPiece] = {
+                        ...updated[selectedPiece],
+                        y: newHeight
+                      };
+                      return updated;
+                    });
+                  }
                 }}
                 className="w-full slider-thumb-orange"
                 disabled={selectedPiece === null}
