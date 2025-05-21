@@ -78,7 +78,7 @@ const StepFunctionVisualizer = () => {
   const [zoomDomain, setZoomDomain] = useState({ xMin: MIN_X, xMax: MAX_X });
   const [isZoomed, setIsZoomed] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(1); // For manual zoom controls
-  const [freeScrolling, setFreeScrolling] = useState(false); // Allow unrestricted panning
+  const [freeScrolling, setFreeScrolling] = useState(true); // Allow unrestricted panning, now enabled by default
   
   // Save state for different configurations
   const [savedStates, setSavedStates] = useState({
@@ -444,31 +444,41 @@ const StepFunctionVisualizer = () => {
   
   // Handle zooming out
   const zoomOut = useCallback(() => {
-    // Calculate new zoom domain
-    const currentWidth = zoomDomain.xMax - zoomDomain.xMin;
-    const newWidth = Math.min(MAX_X - MIN_X, currentWidth * 1.5); // Zoom out by increasing width
-    
-    // If a piece is selected, keep that piece as the center point
-    let center;
-    if (selectedPiece !== null && stepFunction[selectedPiece]) {
-      center = stepFunction[selectedPiece].x;
-    } else {
-      center = (zoomDomain.xMin + zoomDomain.xMax) / 2;
-    }
-    
-    const newMin = Math.max(MIN_X, center - (newWidth / 2));
-    const newMax = Math.min(MAX_X, center + (newWidth / 2));
-    
-    // If we're already at full width or close to it, reset zoom
-    if (newMax - newMin >= (MAX_X - MIN_X) * 0.95) {
+    // If we're at zoom level 1 or we're close to full view, just reset zoom completely
+    if (zoomLevel <= 1 || (zoomDomain.xMin <= MIN_X + 0.01 && zoomDomain.xMax >= MAX_X - 0.01)) {
       resetZoom();
       return;
     }
     
+    // Calculate new zoom domain
+    const currentWidth = zoomDomain.xMax - zoomDomain.xMin;
+    const newWidth = Math.min(MAX_X - MIN_X, currentWidth * 1.5); // Zoom out by increasing width by 50%
+    
+    // Use the current center point
+    const center = (zoomDomain.xMin + zoomDomain.xMax) / 2;
+    
+    // Calculate new boundaries
+    let newMin = Math.max(MIN_X, center - (newWidth / 2));
+    let newMax = Math.min(MAX_X, center + (newWidth / 2));
+    
+    // If the new width would exceed the full width, just reset zoom
+    if (newWidth >= (MAX_X - MIN_X) * 0.95) {
+      resetZoom();
+      return;
+    }
+    
+    // Make sure we maintain the aspect ratio if we hit a boundary
+    if (newMin === MIN_X) {
+      newMax = newMin + newWidth;
+    } else if (newMax === MAX_X) {
+      newMin = newMax - newWidth;
+    }
+    
+    // Update the zoom domain and level
     setZoomDomain({ xMin: newMin, xMax: newMax });
     setZoomLevel(prev => Math.max(1, prev - 1));
-    setIsZoomed(newMin > MIN_X || newMax < MAX_X);
-  }, [zoomDomain, selectedPiece, stepFunction, resetZoom]);
+    setIsZoomed(true);
+  }, [zoomDomain, zoomLevel, resetZoom]);
   
   // Pan left
   const panLeft = useCallback(() => {
@@ -693,25 +703,6 @@ const StepFunctionVisualizer = () => {
             <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5" />
             </svg>
-          </button>
-          
-          <div className="border-l border-gray-300 mx-1 h-6"></div>
-          
-          <button
-            onClick={() => setFreeScrolling(prev => !prev)}
-            disabled={!isZoomed}
-            className={`p-1 rounded ${!isZoomed ? 'text-gray-400' : freeScrolling ? 'text-green-500 bg-green-100 hover:bg-green-200' : 'text-blue-500 hover:bg-blue-100'}`}
-            title={freeScrolling ? "Free panning enabled (click to lock to selected)" : "Locked to selected piece (click to enable free panning)"}
-          >
-            {freeScrolling ? (
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 11V7a4 4 0 118 0m-4 8v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2z" />
-              </svg>
-            ) : (
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-              </svg>
-            )}
           </button>
         </div>
       </div>
