@@ -344,87 +344,102 @@ const StepFunctionVisualizer = () => {
       
       {/* Controls */}
       <div className="bg-white p-4 rounded-lg shadow">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <div className="mb-2">Number of Pieces: {numPieces}</div>
-            <div className="relative w-full">
-              <input
-                type="range"
-                min="5"
-                max={MAX_PIECES}
-                value={numPieces}
-                onChange={(e) => setNumPieces(Number(e.target.value))}
-                className="w-full slider-thumb-orange"
-                style={{
-                  background: `linear-gradient(to right, #8884d8 0%, #8884d8 ${(numPieces / MAX_PIECES) * 100}%, #e5e7eb ${(numPieces / MAX_PIECES) * 100}%, #e5e7eb 100%)`
-                }}
-              />
+        <div className="grid grid-cols-2 gap-6">
+          {/* Left column - Sliders */}
+          <div className="flex flex-col space-y-6">
+            <div>
+              <div className="mb-2 font-medium">Number of Pieces: {numPieces}</div>
+              <div className="relative w-full">
+                <input
+                  type="range"
+                  min="5"
+                  max={MAX_PIECES}
+                  value={numPieces}
+                  onChange={(e) => setNumPieces(Number(e.target.value))}
+                  className="w-full slider-thumb-orange"
+                  style={{
+                    background: `linear-gradient(to right, #8884d8 0%, #8884d8 ${(numPieces / MAX_PIECES) * 100}%, #e5e7eb ${(numPieces / MAX_PIECES) * 100}%, #e5e7eb 100%)`
+                  }}
+                />
+              </div>
+            </div>
+            
+            <div>
+              <div className="mb-2 font-medium">Height Adjustment: {currentHeight.toFixed(2)}</div>
+              <div className="relative w-full">
+                <input
+                  type="range"
+                  min="0"
+                  max={MAX_HEIGHT * 5}
+                  step="0.1"
+                  value={currentHeight}
+                  disabled={selectedPiece === null}
+                  className="w-full slider-thumb-orange"
+                  onInput={(e) => {
+                    if (selectedPiece === null) return;
+                    
+                    // Get new height value from slider
+                    const newHeight = Number(e.target.value);
+                    
+                    // Update current height value
+                    setCurrentHeight(newHeight);
+                    
+                    // Update both step function and display in sync
+                    setStepFunction(prev => {
+                      const updated = [...prev];
+                      updated[selectedPiece] = {
+                        ...updated[selectedPiece],
+                        y: newHeight
+                      };
+                      
+                      // Calculate autoconvolution in the same update
+                      // This ensures the step function and autoconvolution stay in sync
+                      calculateAutoconvolution(updated);
+                      updateTotalHeight(updated);
+                      
+                      return updated;
+                    });
+                  }}
+                  style={{
+                    background: selectedPiece !== null ? 
+                      `linear-gradient(to right, #ff7300 0%, #ff7300 ${(currentHeight / (MAX_HEIGHT * 5)) * 100}%, #e5e7eb ${(currentHeight / (MAX_HEIGHT * 5)) * 100}%, #e5e7eb 100%)` : 
+                      '#e5e7eb'
+                  }}
+                />
+              </div>
             </div>
           </div>
           
-          <div>
-            <button
-              onClick={generateRandomStepFunction}
-              className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
-            >
-              Regenerate Random
-            </button>
-          </div>
-          
-          <div>
-            <div className="mb-2">Selected Piece: {selectedPiece !== null ? selectedPiece : 'None'}</div>
-            {selectedPiece !== null && (
-              <button
-                onClick={handlePieceDeselect}
-                className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
-              >
-                Deselect
-              </button>
-            )}
-          </div>
-          
-          <div>
-            <div className="mb-2">Height Adjustment: {currentHeight.toFixed(2)}</div>
-            <div className="relative w-full">
-              <input
-                type="range"
-                min="0"
-                max={MAX_HEIGHT * 5}
-                step="0.1"
-                value={currentHeight}
-                disabled={selectedPiece === null}
-                className="w-full slider-thumb-orange"
-                onInput={(e) => {
-                  if (selectedPiece === null) return;
-                  
-                  // Get new height value from slider
-                  const newHeight = Number(e.target.value);
-                  
-                  // Update current height value
-                  setCurrentHeight(newHeight);
-                  
-                  // Update both step function and display in sync
-                  setStepFunction(prev => {
-                    const updated = [...prev];
-                    updated[selectedPiece] = {
-                      ...updated[selectedPiece],
-                      y: newHeight
-                    };
-                    
-                    // Calculate autoconvolution in the same update
-                    // This ensures the step function and autoconvolution stay in sync
-                    calculateAutoconvolution(updated);
-                    updateTotalHeight(updated);
-                    
-                    return updated;
-                  });
-                }}
-                style={{
-                  background: selectedPiece !== null ? 
-                    `linear-gradient(to right, #ff7300 0%, #ff7300 ${(currentHeight / (MAX_HEIGHT * 5)) * 100}%, #e5e7eb ${(currentHeight / (MAX_HEIGHT * 5)) * 100}%, #e5e7eb 100%)` : 
-                    '#e5e7eb'
-                }}
-              />
+          {/* Right column - Buttons and Info */}
+          <div className="flex flex-col justify-between">
+            <div className="flex flex-col space-y-2">
+              <div className="font-medium mb-2">Selected Piece: {selectedPiece !== null ? selectedPiece : 'None'}</div>
+              <div className="flex space-x-4">
+                <button
+                  onClick={generateRandomStepFunction}
+                  className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 flex-grow"
+                >
+                  Regenerate Random
+                </button>
+                
+                {selectedPiece !== null && (
+                  <button
+                    onClick={handlePieceDeselect}
+                    className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                  >
+                    Deselect
+                  </button>
+                )}
+              </div>
+            </div>
+            
+            <div className="text-sm text-gray-700 mt-4">
+              <div className="font-semibold">Instructions:</div>
+              <ol className="list-decimal pl-5 mt-1">
+                <li>Click on any bar to select it (turns orange)</li>
+                <li>Drag selected bar up/down to adjust height or use the slider</li>
+                <li>The autoconvolution plot shows Google's bound at 1.5053</li>
+              </ol>
             </div>
           </div>
         </div>
@@ -446,15 +461,6 @@ const StepFunctionVisualizer = () => {
         <div className="text-sm mt-2 text-red-600">Google's bound: {GOOGLE_BOUND} (red line)</div>
       </div>
       
-      {/* Instructions */}
-      <div className="text-sm bg-gray-100 p-4 rounded">
-        <strong>Instructions:</strong>
-        <ol className="list-decimal pl-5">
-          <li>Click on any bar to select it (turns orange)</li>
-          <li>Drag selected bar up/down to adjust height or use the slider</li>
-          <li>The autoconvolution plot shows Google's bound at 1.5053</li>
-        </ol>
-      </div>
     </div>
   );
 };
