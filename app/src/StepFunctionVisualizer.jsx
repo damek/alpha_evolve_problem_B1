@@ -38,23 +38,8 @@ const StepFunctionVisualizer = () => {
   // Update max autoconvolution value when autoconvolution changes
   useEffect(() => {
     if (autoconvolution.length > 0) {
-      // Clear any pending timeout
-      if (stateRef.current.maxAutoTimeout) {
-        clearTimeout(stateRef.current.maxAutoTimeout);
-      }
-      
-      // Set a new timeout
-      stateRef.current.maxAutoTimeout = setTimeout(() => {
-        const maxVal = Math.max(...autoconvolution.map(point => point.y));
-        setMaxAutoconvValue(maxVal);
-      }, 100);
-      
-      // Cleanup on unmount
-      return () => {
-        if (stateRef.current.maxAutoTimeout) {
-          clearTimeout(stateRef.current.maxAutoTimeout);
-        }
-      };
+      const maxVal = Math.max(...autoconvolution.map(point => point.y));
+      setMaxAutoconvValue(maxVal);
     }
   }, [autoconvolution]);
   
@@ -156,7 +141,7 @@ const StepFunctionVisualizer = () => {
     // Update current height
     setCurrentHeight(newHeight);
     
-    // Update step function
+    // Update step function and calculate autoconvolution immediately
     setStepFunction(prev => {
       const updated = [...prev];
       updated[selectedPiece] = {
@@ -164,22 +149,12 @@ const StepFunctionVisualizer = () => {
         y: newHeight
       };
       
-      // Update reference for debounced calculations
-      stateRef.current.stepFunction = updated;
+      // Calculate autoconvolution immediately for real-time feedback
+      calculateAutoconvolution(updated);
+      updateTotalHeight(updated);
+      
       return updated;
     });
-    
-    // Clear existing timeout if there is one
-    if (stateRef.current.autoConvTimeout) {
-      clearTimeout(stateRef.current.autoConvTimeout);
-    }
-    
-    // Debounced auto-convolution update
-    stateRef.current.autoConvTimeout = setTimeout(() => {
-      // Calculate autoconvolution and update total height using the latest step function
-      calculateAutoconvolution(stateRef.current.stepFunction);
-      updateTotalHeight(stateRef.current.stepFunction);
-    }, 100); // 100ms debounce
   }, [selectedPiece, calculateAutoconvolution, updateTotalHeight]);
   
   // Handle drag start
@@ -206,11 +181,10 @@ const StepFunctionVisualizer = () => {
       const heightScale = MAX_HEIGHT / (chartRect.height * 0.4); // Reduced divisor to allow for larger height changes
       const newHeight = Math.max(0, startHeight + deltaY * heightScale); // Removed upper limit
       
-      // Don't update the auto-convolution on every move, just update the height
-      // Update the height directly rather than using handleHeightChange to avoid frequent calculation
+      // Update current height
       setCurrentHeight(newHeight);
       
-      // Update step function without triggering autoconvolution
+      // Update step function and calculate autoconvolution in real-time
       setStepFunction(prev => {
         const updated = [...prev];
         updated[selectedPiece] = {
@@ -218,8 +192,10 @@ const StepFunctionVisualizer = () => {
           y: newHeight
         };
         
-        // Update reference for debounced calculations
-        stateRef.current.stepFunction = updated;
+        // Calculate autoconvolution immediately for real-time feedback
+        calculateAutoconvolution(updated);
+        updateTotalHeight(updated);
+        
         return updated;
       });
     };
@@ -230,10 +206,6 @@ const StepFunctionVisualizer = () => {
       // Remove event listeners
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
-      
-      // Now that dragging is done, update autoconvolution
-      calculateAutoconvolution(stateRef.current.stepFunction);
-      updateTotalHeight(stateRef.current.stepFunction);
     };
     
     // Add event listeners
@@ -256,7 +228,6 @@ const StepFunctionVisualizer = () => {
               }
             }}
             isAnimationActive={false}
-            throttleDelay={16}
           >
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis
@@ -332,7 +303,6 @@ const StepFunctionVisualizer = () => {
           <LineChart 
             data={autoconvolution}
             isAnimationActive={false}
-            throttleDelay={16}
           >
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis
