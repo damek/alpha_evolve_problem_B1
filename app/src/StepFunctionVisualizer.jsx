@@ -245,21 +245,42 @@ const StepFunctionVisualizer = () => {
   
   // Define function to create a step function from heights
   const createStepFunction = (heights) => {
-    const pieces = heights.length;
-    const pieceWidth = (MAX_X - MIN_X) / pieces;
-    let newStepFunction = [];
-    
-    for (let i = 0; i < pieces; i++) {
-      const x = MIN_X + (i + 0.5) * pieceWidth;
-      newStepFunction.push({
-        x,
-        y: heights[i], 
-        pieceIndex: i,
-        width: pieceWidth
-      });
+    try {
+      // Validate input
+      if (!Array.isArray(heights)) {
+        console.error("Heights must be an array:", heights);
+        return [];
+      }
+      
+      const pieces = heights.length;
+      if (pieces <= 0) {
+        console.error("Heights array is empty");
+        return [];
+      }
+      
+      console.log(`Creating step function with ${pieces} pieces`);
+      
+      const pieceWidth = (MAX_X - MIN_X) / pieces;
+      let newStepFunction = [];
+      
+      for (let i = 0; i < pieces; i++) {
+        const x = MIN_X + (i + 0.5) * pieceWidth;
+        // Ensure height value is valid
+        const height = heights[i] !== undefined ? Number(heights[i]) : 0;
+        
+        newStepFunction.push({
+          x,
+          y: isNaN(height) ? 0 : Math.max(0, height), 
+          pieceIndex: i,
+          width: pieceWidth
+        });
+      }
+      
+      return newStepFunction;
+    } catch (error) {
+      console.error("Error creating step function:", error);
+      return [];
     }
-    
-    return newStepFunction;
   };
 
   // Function to save current state before switching
@@ -348,52 +369,59 @@ const StepFunctionVisualizer = () => {
       saveCurrentState();
     }
     
-    const pieces = numPieces; // Use current number of pieces
-    const pieceWidth = (MAX_X - MIN_X) / pieces;
-    let heights = [];
-    
-    // Generate a consistent pattern of heights that works well for any number of pieces
-    // This ensures the visualization will be stable regardless of piece count
-    const baseHeight = 1.0; // Base height for all pieces
-    const variationScale = 0.5; // Scale of random variation
-    
-    for (let i = 0; i < pieces; i++) {
-      // Create a wave pattern with some random variation
-      // This ensures a stable, visually appealing pattern for any number of pieces
-      const centerDist = Math.abs(i - pieces/2) / (pieces/2); // 0 at center, 1 at edges
-      const basePattern = Math.cos(centerDist * Math.PI) * 2 + 1; // Higher in the middle
+    try {
+      console.log("Generating random step function with pieces:", numPieces);
       
-      // Add random variation but keep all heights positive
-      const randomFactor = 0.5 + Math.random();
-      const height = baseHeight + basePattern * randomFactor * variationScale;
-      
-      heights.push(Math.max(0.1, height));
-    }
-    
-    // Ensure at least a few pieces have substantial height
-    for (let i = 0; i < Math.min(5, pieces); i++) {
-      const centerIndex = Math.floor(pieces / 2) + (i - 2);
-      if (centerIndex >= 0 && centerIndex < pieces) {
-        heights[centerIndex] = 1.0 + Math.random() * 3;
+      // Validate number of pieces to ensure it's a positive integer
+      const pieces = Math.max(5, Math.floor(Number(numPieces))); 
+      if (isNaN(pieces) || pieces <= 0) {
+        console.error("Invalid number of pieces:", numPieces);
+        return; // Don't proceed with invalid input
       }
+      
+      const pieceWidth = (MAX_X - MIN_X) / pieces;
+      let heights = [];
+      
+      // Generate completely random heights with no pattern
+      // Pre-allocate the array to avoid potential reflow issues
+      heights = new Array(pieces);
+      
+      // Fill the array with random values
+      for (let i = 0; i < pieces; i++) {
+        // Use a distribution that gives more variety of heights
+        // Random value between 0.1 and 5
+        heights[i] = 0.1 + Math.random() * 4.9;
+      }
+      
+      // Ensure we have some higher values scattered throughout
+      const numHighValues = Math.min(10, Math.floor(pieces * 0.1)); // Up to 10% of pieces or 10, whichever is smaller
+      
+      for (let i = 0; i < numHighValues; i++) {
+        const randomIndex = Math.floor(Math.random() * pieces);
+        heights[randomIndex] = 5 + Math.random() * 5; // Higher values (5-10) at random positions
+      }
+      
+      // Create step function
+      const newStepFunction = createStepFunction(heights);
+      
+      // Update state
+      setStepFunction(newStepFunction);
+      setSelectedPiece(null);
+      setCurrentHeight(0);
+      
+      // Calculate derived values
+      const result = calculateAutoconvolutionData(newStepFunction);
+      setAutoconvolution(result);
+      setTotalHeight(calculateTotalHeight(newStepFunction));
+      
+      // Set current config to random
+      setCurrentConfig('random');
+      
+      console.log("Successfully generated random step function with", pieces, "pieces");
+    } catch (error) {
+      console.error("Error generating random step function:", error);
     }
-    
-    // Create step function
-    const newStepFunction = createStepFunction(heights);
-    
-    // Update state
-    setStepFunction(newStepFunction);
-    setSelectedPiece(null);
-    setCurrentHeight(0);
-    
-    // Calculate derived values
-    const result = calculateAutoconvolutionData(newStepFunction);
-    setAutoconvolution(result);
-    setTotalHeight(calculateTotalHeight(newStepFunction));
-    
-    // Set current config to random
-    setCurrentConfig('random');
-  }, [numPieces, currentConfig, saveCurrentState]);
+  }, [numPieces, currentConfig, saveCurrentState, calculateAutoconvolutionData]);
   
   // Handle piece selection
   const handlePieceClick = useCallback((index) => {
@@ -433,14 +461,20 @@ const StepFunctionVisualizer = () => {
   const updateHeight = useCallback((newHeight) => {
     if (selectedPiece === null) return;
     
-    // Ensure the height is valid
-    const validHeight = Math.max(0, newHeight);
+    // Ensure the height is valid - it must be a number and non-negative
+    const validHeight = typeof newHeight === 'number' && !isNaN(newHeight) 
+      ? Math.max(0, newHeight)
+      : 0;
     
-    // Update current height
+    // Update current height in state
     setCurrentHeight(validHeight);
     
     // Update step function and calculate autoconvolution immediately
     setStepFunction(prev => {
+      // Validate that selectedPiece is still valid
+      if (selectedPiece >= prev.length || selectedPiece < 0) return prev;
+      
+      // Create a new array with the updated piece
       const updated = [...prev];
       updated[selectedPiece] = {
         ...updated[selectedPiece],
@@ -448,13 +482,14 @@ const StepFunctionVisualizer = () => {
       };
       
       // Calculate autoconvolution immediately for real-time feedback
+      // We need to do this inside the updater function to ensure we're using the updated step function
       const result = calculateAutoconvolutionData(updated);
       setAutoconvolution(result);
       setTotalHeight(calculateTotalHeight(updated));
       
       return updated;
     });
-  }, [selectedPiece]);
+  }, [selectedPiece, calculateAutoconvolutionData]);
   
   // Handle height slider change (keeping for compatibility)
   const handleHeightChange = useCallback((newHeight) => {
@@ -481,9 +516,29 @@ const StepFunctionVisualizer = () => {
       // Calculate delta from start position
       const deltaY = startY - moveEvent.clientY;
       
-      // Scale delta to height (higher = more height)
-      const heightScale = MAX_HEIGHT / (chartRect.height * 0.4); // Reduced divisor to allow for larger height changes
-      const newHeight = Math.max(0, startHeight + deltaY * heightScale); // Removed upper limit
+      // Implement an adaptive scale based on:
+      // 1. The current number of pieces (smaller pieces need finer control)
+      // 2. The current height (smaller heights need finer adjustments)
+      // 3. Whether shift key is pressed (for super fine adjustments)
+      
+      // Base scale adjusted by number of pieces - more pieces means finer control
+      const pieceAdjustment = Math.max(0.4, Math.min(1.0, 50 / numPieces));
+      
+      // Height adjustment factor - smaller heights get finer control
+      const heightAdjustment = Math.max(0.3, Math.min(1.0, startHeight / 5));
+      
+      // Check if shift key is pressed for fine adjustment mode
+      const isShiftPressed = moveEvent.shiftKey;
+      const shiftModifier = isShiftPressed ? 0.2 : 1.0;
+      
+      // Calculate the final scale factor
+      const heightScale = (MAX_HEIGHT / (chartRect.height * 0.8)) * 
+                           pieceAdjustment * 
+                           heightAdjustment * 
+                           shiftModifier;
+      
+      // Apply the scale to get the new height
+      const newHeight = Math.max(0, startHeight + deltaY * heightScale);
       
       // Use the unified update height function
       updateHeight(newHeight);
@@ -500,7 +555,7 @@ const StepFunctionVisualizer = () => {
     // Add event listeners
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
-  }, [selectedPiece, currentHeight, handlePieceClick, updateHeight]);
+  }, [selectedPiece, currentHeight, numPieces, handlePieceClick, updateHeight]);
   
   // Reset zoom (defined first to avoid circular dependency)
   const resetZoom = useCallback(() => {
@@ -689,6 +744,17 @@ const StepFunctionVisualizer = () => {
               formatter={(value) => [value.toFixed(2), 'f(x)']}
               labelFormatter={(label) => `x: ${Number(label).toFixed(3)}`}
               isAnimationActive={false}
+              content={({ active, payload, label }) => {
+                if (active && payload && payload.length) {
+                  return (
+                    <div className="custom-tooltip bg-white p-2 border border-gray-300 rounded shadow-sm">
+                      <p className="label mb-1">{`x: ${Number(label).toFixed(3)}`}</p>
+                      <p className="value">{`f(x): ${payload[0].value.toFixed(2)}`}</p>
+                    </div>
+                  );
+                }
+                return null;
+              }}
             />
             <ReferenceLine y={0} stroke="#000" />
             <ReferenceLine x={0} stroke="#000" />
@@ -730,6 +796,8 @@ const StepFunctionVisualizer = () => {
                       cursor={selectedPiece === index ? 'ns-resize' : 'pointer'}
                       pointerEvents="none" // Let the invisible rectangle handle events
                     />
+                    
+                    {/* No shift key text indicator */}
                   </g>
                 );
               }}
@@ -849,13 +917,59 @@ const StepFunctionVisualizer = () => {
     }
   }, [isInitialized, generateRandomStepFunction]);
   
-  // Effect to update when slider changes
+  // Effect to update ONLY when lastManualPiecesChange changes (slider is moved)
   useEffect(() => {
-    if (lastManualPiecesChange > 0 && currentConfig === 'random') {
-      // Prevent this effect from running for predefined solutions
-      generateRandomStepFunction();
-    }
-  }, [lastManualPiecesChange, generateRandomStepFunction, currentConfig]);
+    // Skip the initial render (only respond to actual slider changes)
+    if (lastManualPiecesChange === 0) return;
+    
+    // Skip if not in random mode
+    if (currentConfig !== 'random') return;
+    
+    console.log("Slider change detected, timestamp:", lastManualPiecesChange);
+    
+    // Use a ref to track if this effect has already run for this timestamp
+    // This prevents potential re-renders from causing multiple updates
+    const timestamp = lastManualPiecesChange;
+    
+    const timerId = setTimeout(() => {
+      // Create a new array of random heights
+      const pieces = numPieces;
+      let heights = new Array(pieces);
+      
+      // Fill with random heights between 0.1 and 5
+      for (let i = 0; i < pieces; i++) {
+        heights[i] = 0.1 + Math.random() * 4.9;
+      }
+      
+      // Add some higher values for visual interest
+      const numHighValues = Math.min(10, Math.floor(pieces * 0.1));
+      for (let i = 0; i < numHighValues; i++) {
+        const randomIndex = Math.floor(Math.random() * pieces);
+        heights[randomIndex] = 5 + Math.random() * 5; // Values between 5-10
+      }
+      
+      // Create a new step function with these heights
+      const newStepFunction = createStepFunction(heights);
+      
+      // Batch all state updates together to minimize re-renders
+      // This is critical to prevent cascading updates
+      setStepFunction(newStepFunction);
+      setSelectedPiece(null);
+      setCurrentHeight(0);
+      
+      // Calculate derived values
+      const result = calculateAutoconvolutionData(newStepFunction);
+      setAutoconvolution(result);
+      setTotalHeight(calculateTotalHeight(newStepFunction));
+      
+      console.log("Updated step function for new pieces count:", pieces);
+    }, 50);
+    
+    return () => clearTimeout(timerId);
+    
+    // CRITICAL: Only depend on lastManualPiecesChange, not on any values that change as a result
+    // of updating the step function. This breaks the loop.
+  }, [lastManualPiecesChange]);
 
   // Notification Component
   const Notification = () => {
@@ -887,6 +1001,16 @@ const StepFunctionVisualizer = () => {
         <div className="grid grid-cols-2 gap-6">
           {/* Left column - Sliders */}
           <div className="flex flex-col space-y-6">
+            {/* Tip banner for dragging with shift key */}
+            <div className="bg-blue-50 border-l-4 border-blue-400 p-2 rounded shadow-sm mb-2">
+              <div className="flex items-center text-sm text-blue-700">
+                <span className="mr-1">💡</span>
+                <span>
+                  <strong>Tip:</strong> Hold <kbd className="bg-gray-200 px-1 rounded">Shift</kbd> key when dragging bars on the chart for fine adjustments
+                </span>
+              </div>
+            </div>
+            
             <div>
               <div className="mb-2 font-medium flex justify-between">
                 <span>Number of Pieces: {numPieces}</span>
@@ -907,10 +1031,25 @@ const StepFunctionVisualizer = () => {
                     // Only process changes if in random mode
                     if (currentConfig !== 'random') return;
                     
-                    // Update the number of pieces
-                    setNumPieces(Number(e.target.value));
-                    // Track that this was a manual change
-                    setLastManualPiecesChange(Date.now());
+                    try {
+                      // Get the new value, ensure it's a valid number
+                      const newValue = Math.max(5, Math.floor(Number(e.target.value)));
+                      
+                      if (isNaN(newValue) || newValue <= 0) {
+                        console.error("Invalid slider value:", e.target.value);
+                        return;
+                      }
+                      
+                      console.log("Setting numPieces from slider:", newValue);
+                      
+                      // Update the number of pieces
+                      setNumPieces(newValue);
+                      
+                      // Track that this was a manual change - use a timestamp
+                      setLastManualPiecesChange(Date.now());
+                    } catch (error) {
+                      console.error("Error updating pieces:", error);
+                    }
                   }}
                   className={`w-full ${currentConfig === 'random' ? 'slider-thumb-orange' : 'opacity-60 cursor-not-allowed'}`}
                   style={{
@@ -930,9 +1069,42 @@ const StepFunctionVisualizer = () => {
                       const newHeight = Math.max(0, currentHeight - 0.01);
                       updateHeight(newHeight);
                     }}
+                    onMouseDown={() => {
+                      if (selectedPiece === null) return;
+                      
+                      // Reference to store interval ID
+                      const timers = {
+                        interval: null,
+                        timeout: null
+                      };
+                      
+                      // Function to decrease height - gets called repeatedly
+                      const decreaseHeight = () => {
+                        setCurrentHeight(prevHeight => {
+                          const newHeight = Math.max(0, prevHeight - 0.01);
+                          updateHeight(newHeight);
+                          return newHeight;
+                        });
+                      };
+                      
+                      // Create cleanup function
+                      const cleanup = () => {
+                        if (timers.timeout) clearTimeout(timers.timeout);
+                        if (timers.interval) clearInterval(timers.interval);
+                        document.removeEventListener('mouseup', cleanup);
+                      };
+                      
+                      // Start timer after short delay
+                      timers.timeout = setTimeout(() => {
+                        timers.interval = setInterval(decreaseHeight, 50);
+                      }, 300);
+                      
+                      // Add global mouseup listener to stop when mouse is released anywhere
+                      document.addEventListener('mouseup', cleanup);
+                    }}
                     disabled={selectedPiece === null}
                     className={`p-1 rounded ${selectedPiece === null ? 'text-gray-400' : 'text-blue-500 hover:bg-blue-100'}`}
-                    title="Decrease by 0.01"
+                    title="Decrease by 0.01 (hold for continuous)"
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
@@ -962,9 +1134,42 @@ const StepFunctionVisualizer = () => {
                       const newHeight = currentHeight + 0.01;
                       updateHeight(newHeight);
                     }}
+                    onMouseDown={() => {
+                      if (selectedPiece === null) return;
+                      
+                      // Reference to store interval ID
+                      const timers = {
+                        interval: null,
+                        timeout: null
+                      };
+                      
+                      // Function to increase height - gets called repeatedly
+                      const increaseHeight = () => {
+                        setCurrentHeight(prevHeight => {
+                          const newHeight = prevHeight + 0.01;
+                          updateHeight(newHeight);
+                          return newHeight;
+                        });
+                      };
+                      
+                      // Create cleanup function
+                      const cleanup = () => {
+                        if (timers.timeout) clearTimeout(timers.timeout);
+                        if (timers.interval) clearInterval(timers.interval);
+                        document.removeEventListener('mouseup', cleanup);
+                      };
+                      
+                      // Start timer after short delay
+                      timers.timeout = setTimeout(() => {
+                        timers.interval = setInterval(increaseHeight, 50);
+                      }, 300);
+                      
+                      // Add global mouseup listener to stop when mouse is released anywhere
+                      document.addEventListener('mouseup', cleanup);
+                    }}
                     disabled={selectedPiece === null}
                     className={`p-1 rounded ${selectedPiece === null ? 'text-gray-400' : 'text-blue-500 hover:bg-blue-100'}`}
-                    title="Increase by 0.01"
+                    title="Increase by 0.01 (hold for continuous)"
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -1148,6 +1353,7 @@ const StepFunctionVisualizer = () => {
               <ol className="list-decimal pl-5 mt-1">
                 <li>Click on any bar to select it (turns orange)</li>
                 <li>Drag selected bar up/down to adjust height or use the slider</li>
+                <li><strong>Hold Shift key</strong> while dragging for fine-grained adjustments</li>
                 <li>Use the zoom controls (+ and -) to zoom in/out on the x-axis</li>
                 <li>When zoomed in, use the left/right arrows to pan the view</li>
                 <li>Click the expand icon to reset zoom back to full view</li>
