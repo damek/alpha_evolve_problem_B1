@@ -386,64 +386,119 @@ const StepFunctionVisualizer = () => {
           <div>
             <div className="mb-2">Height Adjustment: {currentHeight.toFixed(2)}</div>
             <div className="relative w-full">
-              <input
-                type="range"
-                min="0"
-                max={MAX_HEIGHT * 5}
-                step="0.1"
-                value={currentHeight}
-                onInput={(e) => {
-                  // For smooth updates during dragging the slider
-                  const newHeight = Number(e.target.value);
-                  if (selectedPiece !== null) {
-                    // Update current height directly
-                    const newValue = newHeight;
-                    setCurrentHeight(newValue);
+              <div
+                ref={(el) => {
+                  // Store the slider container in stateRef for direct access
+                  stateRef.current.sliderContainer = el;
+                }}
+                className="relative w-full h-10 flex items-center cursor-pointer"
+                onMouseDown={(startEvent) => {
+                  if (selectedPiece === null) return;
+                  
+                  // Prevent default behavior
+                  startEvent.preventDefault();
+                  
+                  // Get container dimensions
+                  const container = stateRef.current.sliderContainer;
+                  if (!container) return;
+                  
+                  const containerRect = container.getBoundingClientRect();
+                  const containerWidth = containerRect.width;
+                  
+                  // Calculate value based on click position
+                  const handleMouseMove = (moveEvent) => {
+                    // Calculate position ratio (0 to 1)
+                    const relativeX = Math.max(0, Math.min(moveEvent.clientX - containerRect.left, containerWidth));
+                    const ratio = relativeX / containerWidth;
                     
-                    // Use a more direct approach to avoid re-renders
-                    // This mimics what we do in the drag handler
+                    // Calculate new height value
+                    const newHeight = ratio * (MAX_HEIGHT * 5);
+                    
+                    // Update display without triggering full re-renders
+                    if (container.querySelector('.slider-track')) {
+                      container.querySelector('.slider-track').style.width = `${ratio * 100}%`;
+                    }
+                    if (container.querySelector('.slider-thumb')) {
+                      container.querySelector('.slider-thumb').style.left = `${ratio * 100}%`;
+                    }
+                    if (container.querySelector('.slider-value')) {
+                      container.querySelector('.slider-value').textContent = newHeight.toFixed(1);
+                    }
+                    
+                    // Update height without triggering re-renders
                     const updatedStepFunction = [...stepFunction];
                     updatedStepFunction[selectedPiece] = {
                       ...updatedStepFunction[selectedPiece],
-                      y: newValue
+                      y: newHeight
                     };
                     
-                    // Update without triggering multiple re-renders
+                    // Store in ref for access by other functions
                     stateRef.current.stepFunction = updatedStepFunction;
+                    stateRef.current.currentHeight = newHeight;
                     
-                    // We're not manipulating the DOM directly now, as it was causing issues
-                    
-                    // Calculate autoconvolution directly
+                    // Update the autoconvolution (this should be the only React state update)
                     calculateAutoconvolution(updatedStepFunction);
                     updateTotalHeight(updatedStepFunction);
+                  };
+                  
+                  // Initial position calculation on mouse down
+                  handleMouseMove(startEvent);
+                  
+                  // Handle mouse up to clean up
+                  const handleMouseUp = (upEvent) => {
+                    document.removeEventListener('mousemove', handleMouseMove);
+                    document.removeEventListener('mouseup', handleMouseUp);
                     
-                    // Don't update state to avoid re-renders
-                    // setStepFunction(updatedStepFunction);
-                  }
+                    // Final state updates once dragging is complete
+                    setCurrentHeight(stateRef.current.currentHeight);
+                    setStepFunction(stateRef.current.stepFunction);
+                  };
+                  
+                  // Add event listeners
+                  document.addEventListener('mousemove', handleMouseMove);
+                  document.addEventListener('mouseup', handleMouseUp);
                 }}
-                onChange={(e) => {
-                  // Final update when the slider is released
-                  const newHeight = Number(e.target.value);
-                  if (selectedPiece !== null) {
-                    // Update step function state at the end
-                    setStepFunction(prev => {
-                      const updated = [...prev];
-                      updated[selectedPiece] = {
-                        ...updated[selectedPiece],
-                        y: newHeight
-                      };
-                      return updated;
-                    });
-                  }
-                }}
-                className="w-full slider-thumb-orange"
-                disabled={selectedPiece === null}
                 style={{
-                  background: selectedPiece !== null ? 
-                    `linear-gradient(to right, #ff7300 0%, #ff7300 ${(currentHeight / (MAX_HEIGHT * 5)) * 100}%, #e5e7eb ${(currentHeight / (MAX_HEIGHT * 5)) * 100}%, #e5e7eb 100%)` : 
-                    '#e5e7eb'
+                  background: '#e5e7eb',
+                  borderRadius: '4px'
                 }}
-              />
+              >
+                {/* Custom slider track (filled part) */}
+                <div 
+                  className="slider-track absolute h-2 bg-orange-500 rounded-l-sm"
+                  style={{
+                    left: 0,
+                    width: selectedPiece !== null ? `${(currentHeight / (MAX_HEIGHT * 5)) * 100}%` : '0%',
+                  }}
+                />
+                
+                {/* Custom slider thumb */}
+                <div 
+                  className="slider-thumb absolute w-5 h-5 bg-orange-500 rounded-full -mt-1.5"
+                  style={{
+                    left: selectedPiece !== null ? `${(currentHeight / (MAX_HEIGHT * 5)) * 100}%` : '0%',
+                    transform: 'translateX(-50%)',
+                    top: '50%',
+                    marginTop: '-2px',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.3)'
+                  }}
+                />
+                
+                {/* Hidden slider value display for updates */}
+                <div className="slider-value hidden">{currentHeight.toFixed(1)}</div>
+                
+                {/* Hidden native range input for accessibility */}
+                <input
+                  type="range"
+                  min="0"
+                  max={MAX_HEIGHT * 5}
+                  step="0.1"
+                  value={currentHeight}
+                  onChange={() => {}}
+                  className="sr-only"
+                  disabled={selectedPiece === null}
+                />
+              </div>
             </div>
           </div>
         </div>
