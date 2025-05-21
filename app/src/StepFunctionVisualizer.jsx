@@ -110,66 +110,119 @@ const StepFunctionVisualizer = () => {
   // Update max autoconvolution value when autoconvolution changes
   useEffect(() => {
     if (autoconvolution.length > 0) {
-      const maxVal = Math.max(...autoconvolution.map(point => point.y));
-      setMaxAutoconvValue(maxVal);
+      try {
+        // Get all y values, filtering out any NaN or infinite values
+        const validYValues = autoconvolution
+          .map(point => point.y)
+          .filter(y => isFinite(y) && !isNaN(y));
+        
+        // If we have valid values, calculate max
+        if (validYValues.length > 0) {
+          const maxVal = Math.max(...validYValues);
+          // Ensure we don't set NaN or infinite values
+          if (isFinite(maxVal) && !isNaN(maxVal)) {
+            setMaxAutoconvValue(maxVal);
+          } else {
+            console.warn("Invalid max value calculated, using default");
+            setMaxAutoconvValue(1.0); // Safe default
+          }
+        } else {
+          console.warn("No valid y values found in autoconvolution data");
+          setMaxAutoconvValue(1.0); // Safe default
+        }
+      } catch (error) {
+        console.error("Error calculating max autoconvolution value:", error);
+        setMaxAutoconvValue(1.0); // Safe default
+      }
     }
   }, [autoconvolution]);
   
   // Define calculation functions separately to avoid circular dependencies
   
-  // Calculate autoconvolution without dependencies on React state
+  // Calculate autoconvolution without dependencies on React state - completely redesigned for stability
   const calculateAutoconvolutionData = (steps) => {
-    // Use the actual number of steps
-    const P = steps.length;
-    const heights = steps.map(step => step.y);
-    const result = [];
-    
-    // Calculate integral of f(x): (1/2P) * sum of heights
-    const pieceWidth = 1/(2*P); // Width of each piece is (MAX_X - MIN_X)/P = 0.5/P = 1/(2P)
-    const heightsSum = heights.reduce((acc, h) => acc + h, 0);
-    const integral = pieceWidth * heightsSum;
-    
-    // Avoid division by zero or very small numbers
-    const integralSquared = Math.max(integral * integral, 1e-10);
-    
-    // For debugging purposes - log values when they might cause issues
-    if (integral < 1e-6 || heightsSum === 0) {
-      console.warn(`Potential calculation issue: P=${P}, integral=${integral}, heightsSum=${heightsSum}`);
-    }
-    
-    // Calculate over a wider range for visualization
-    for (let m = 0; m <= 2 * P; m++) {
-      const t = -0.5 + m / (2 * P);
-      let value = 0;
-      
-      // Skip computation for boundary points
-      if (m === 0 || m === 2 * P) {
-        value = 0;
-      } else {
-        const kMin = Math.max(0, m - P);
-        const kMax = Math.min(P - 1, m - 1);
-        
-        for (let k = kMin; k <= kMax; k++) {
-          value += heights[k] * heights[m - 1 - k];
-        }
-        
-        // Multiply by piece width and divide by integral squared to normalize properly
-        // Ensure we don't divide by zero or very small numbers
-        value = (pieceWidth * value) / integralSquared;
-        
-        // Cap the value to a reasonable range to prevent NaN or Infinity
-        if (!isFinite(value) || isNaN(value)) {
-          console.warn(`Invalid value calculated: ${value} at t=${t}`);
-          value = 0;
-        }
+    try {
+      // Use the actual number of steps
+      const P = steps.length;
+      if (P <= 0) {
+        console.error("No steps provided to calculateAutoconvolutionData");
+        return generateEmptyAutoconvolutionData(P);
       }
       
+      // Extract heights with safety checks
+      const heights = steps.map(step => {
+        if (step === undefined || step === null) return 0;
+        const height = Number(step.y);
+        return isNaN(height) ? 0 : Math.max(0, height); // Ensure non-negative numbers
+      });
+      
+      // Check if we have any non-zero heights
+      const totalHeight = heights.reduce((sum, h) => sum + h, 0);
+      if (totalHeight <= 0.001) {
+        console.warn("All heights are essentially zero, returning empty autoconvolution");
+        return generateEmptyAutoconvolutionData(P);
+      }
+      
+      // Calculate piece width
+      const pieceWidth = 1/(2*P);
+      
+      // Calculate normalized heights (so sum equals 1)
+      const normalizedHeights = heights.map(h => h / totalHeight);
+      
+      // Initialize result array
+      const result = [];
+      
+      // Calculate autoconvolution at each point
+      for (let m = 0; m <= 2 * P; m++) {
+        const t = -0.5 + m / (2 * P);
+        let value = 0;
+        
+        // Skip computation for boundary points
+        if (m === 0 || m === 2 * P) {
+          value = 0;
+        } else {
+          const kMin = Math.max(0, m - P);
+          const kMax = Math.min(P - 1, m - 1);
+          
+          // Calculate raw convolution sum
+          for (let k = kMin; k <= kMax; k++) {
+            value += normalizedHeights[k] * normalizedHeights[m - 1 - k];
+          }
+          
+          // Apply scaling factor based on piece width
+          value = value / pieceWidth;
+          
+          // Safety check for invalid values
+          if (!isFinite(value) || isNaN(value)) {
+            console.warn(`Invalid autoconvolution value at t=${t}, setting to 0`);
+            value = 0;
+          }
+        }
+        
+        result.push({
+          x: t,
+          y: value
+        });
+      }
+      
+      return result;
+    } catch (error) {
+      console.error("Error in autoconvolution calculation:", error);
+      // Return a safe fallback
+      return generateEmptyAutoconvolutionData(steps?.length || 100);
+    }
+  };
+  
+  // Helper to generate empty autoconvolution data
+  const generateEmptyAutoconvolutionData = (P = 100) => {
+    const result = [];
+    for (let m = 0; m <= 2 * P; m++) {
+      const t = -0.5 + m / (2 * P);
       result.push({
         x: t,
-        y: value
+        y: 0
       });
     }
-    
     return result;
   };
   
@@ -299,20 +352,29 @@ const StepFunctionVisualizer = () => {
     const pieceWidth = (MAX_X - MIN_X) / pieces;
     let heights = [];
     
-    // Generate random heights - ensure at least some have non-zero values
-    let nonZeroCount = 0;
+    // Generate a consistent pattern of heights that works well for any number of pieces
+    // This ensures the visualization will be stable regardless of piece count
+    const baseHeight = 1.0; // Base height for all pieces
+    const variationScale = 0.5; // Scale of random variation
+    
     for (let i = 0; i < pieces; i++) {
-      // Using MAX_HEIGHT/5 for initial values to leave room for adjustment
-      // Add a minimum value to avoid all-zero heights
-      const height = 0.1 + Math.random() * (MAX_HEIGHT / 5 - 0.1);
-      heights.push(height);
-      if (height > 0.05) nonZeroCount++;
+      // Create a wave pattern with some random variation
+      // This ensures a stable, visually appealing pattern for any number of pieces
+      const centerDist = Math.abs(i - pieces/2) / (pieces/2); // 0 at center, 1 at edges
+      const basePattern = Math.cos(centerDist * Math.PI) * 2 + 1; // Higher in the middle
+      
+      // Add random variation but keep all heights positive
+      const randomFactor = 0.5 + Math.random();
+      const height = baseHeight + basePattern * randomFactor * variationScale;
+      
+      heights.push(Math.max(0.1, height));
     }
     
-    // If by chance we didn't get enough non-zero heights, ensure we have at least some
-    if (nonZeroCount < Math.min(5, pieces)) {
-      for (let i = 0; i < Math.min(5, pieces); i++) {
-        heights[i] = 0.5 + Math.random() * 3; // Ensure some decent heights
+    // Ensure at least a few pieces have substantial height
+    for (let i = 0; i < Math.min(5, pieces); i++) {
+      const centerIndex = Math.floor(pieces / 2) + (i - 2);
+      if (centerIndex >= 0 && centerIndex < pieces) {
+        heights[centerIndex] = 1.0 + Math.random() * 3;
       }
     }
     
