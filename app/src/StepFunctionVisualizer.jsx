@@ -78,6 +78,7 @@ const StepFunctionVisualizer = () => {
   const [zoomDomain, setZoomDomain] = useState({ xMin: MIN_X, xMax: MAX_X });
   const [isZoomed, setIsZoomed] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(1); // For manual zoom controls
+  const [freeScrolling, setFreeScrolling] = useState(false); // Allow unrestricted panning
   
   // Save state for different configurations
   const [savedStates, setSavedStates] = useState({
@@ -478,23 +479,25 @@ const StepFunctionVisualizer = () => {
     const newMin = Math.max(MIN_X, zoomDomain.xMin - panAmount);
     const newMax = newMin + currentWidth;
     
-    // Check if the selected piece would still be in view
-    if (selectedPiece !== null && stepFunction[selectedPiece]) {
-      const selectedX = stepFunction[selectedPiece].x;
-      // If panning would move the selected piece out of view, don't pan beyond the selected piece
-      if (selectedX >= newMin && selectedX <= newMax) {
-        setZoomDomain({ xMin: newMin, xMax: newMax });
-      } else {
-        // Keep selected piece at the right edge of the view
-        setZoomDomain({ 
-          xMin: Math.max(MIN_X, selectedX - currentWidth * 0.8), 
-          xMax: Math.min(MAX_X, selectedX + currentWidth * 0.2) 
-        });
-      }
-    } else {
+    // Free scrolling mode or no selected piece - pan freely
+    if (freeScrolling || selectedPiece === null || !stepFunction[selectedPiece]) {
       setZoomDomain({ xMin: newMin, xMax: newMax });
+      return;
     }
-  }, [zoomDomain, isZoomed, selectedPiece, stepFunction]);
+    
+    // Check if the selected piece would still be in view
+    const selectedX = stepFunction[selectedPiece].x;
+    // If panning would move the selected piece out of view, don't pan beyond the selected piece
+    if (selectedX >= newMin && selectedX <= newMax) {
+      setZoomDomain({ xMin: newMin, xMax: newMax });
+    } else {
+      // Keep selected piece at the right edge of the view
+      setZoomDomain({ 
+        xMin: Math.max(MIN_X, selectedX - currentWidth * 0.8), 
+        xMax: Math.min(MAX_X, selectedX + currentWidth * 0.2) 
+      });
+    }
+  }, [zoomDomain, isZoomed, selectedPiece, stepFunction, freeScrolling]);
   
   // Pan right
   const panRight = useCallback(() => {
@@ -505,23 +508,25 @@ const StepFunctionVisualizer = () => {
     const newMax = Math.min(MAX_X, zoomDomain.xMax + panAmount);
     const newMin = newMax - currentWidth;
     
-    // Check if the selected piece would still be in view
-    if (selectedPiece !== null && stepFunction[selectedPiece]) {
-      const selectedX = stepFunction[selectedPiece].x;
-      // If panning would move the selected piece out of view, don't pan beyond the selected piece
-      if (selectedX >= newMin && selectedX <= newMax) {
-        setZoomDomain({ xMin: newMin, xMax: newMax });
-      } else {
-        // Keep selected piece at the left edge of the view
-        setZoomDomain({ 
-          xMin: Math.max(MIN_X, selectedX - currentWidth * 0.2), 
-          xMax: Math.min(MAX_X, selectedX + currentWidth * 0.8) 
-        });
-      }
-    } else {
+    // Free scrolling mode or no selected piece - pan freely
+    if (freeScrolling || selectedPiece === null || !stepFunction[selectedPiece]) {
       setZoomDomain({ xMin: newMin, xMax: newMax });
+      return;
     }
-  }, [zoomDomain, isZoomed, selectedPiece, stepFunction]);
+    
+    // Check if the selected piece would still be in view
+    const selectedX = stepFunction[selectedPiece].x;
+    // If panning would move the selected piece out of view, don't pan beyond the selected piece
+    if (selectedX >= newMin && selectedX <= newMax) {
+      setZoomDomain({ xMin: newMin, xMax: newMax });
+    } else {
+      // Keep selected piece at the left edge of the view
+      setZoomDomain({ 
+        xMin: Math.max(MIN_X, selectedX - currentWidth * 0.2), 
+        xMax: Math.min(MAX_X, selectedX + currentWidth * 0.8) 
+      });
+    }
+  }, [zoomDomain, isZoomed, selectedPiece, stepFunction, freeScrolling]);
   
   // Reset current configuration
   const resetCurrentConfig = useCallback(() => {
@@ -688,6 +693,25 @@ const StepFunctionVisualizer = () => {
             <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5" />
             </svg>
+          </button>
+          
+          <div className="border-l border-gray-300 mx-1 h-6"></div>
+          
+          <button
+            onClick={() => setFreeScrolling(prev => !prev)}
+            disabled={!isZoomed}
+            className={`p-1 rounded ${!isZoomed ? 'text-gray-400' : freeScrolling ? 'text-green-500 bg-green-100 hover:bg-green-200' : 'text-blue-500 hover:bg-blue-100'}`}
+            title={freeScrolling ? "Free panning enabled (click to lock to selected)" : "Locked to selected piece (click to enable free panning)"}
+          >
+            {freeScrolling ? (
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 11V7a4 4 0 118 0m-4 8v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2z" />
+              </svg>
+            ) : (
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+              </svg>
+            )}
           </button>
         </div>
       </div>
