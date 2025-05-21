@@ -339,19 +339,22 @@ const StepFunctionVisualizer = () => {
     }
   }, []);
   
-  // Handle height slider change
-  const handleHeightChange = useCallback((newHeight) => {
+  // Unified function to update height for both slider and direct input
+  const updateHeight = useCallback((newHeight) => {
     if (selectedPiece === null) return;
     
+    // Ensure the height is valid
+    const validHeight = Math.max(0, newHeight);
+    
     // Update current height
-    setCurrentHeight(newHeight);
+    setCurrentHeight(validHeight);
     
     // Update step function and calculate autoconvolution immediately
     setStepFunction(prev => {
       const updated = [...prev];
       updated[selectedPiece] = {
         ...updated[selectedPiece],
-        y: newHeight
+        y: validHeight
       };
       
       // Calculate autoconvolution immediately for real-time feedback
@@ -362,6 +365,11 @@ const StepFunctionVisualizer = () => {
       return updated;
     });
   }, [selectedPiece]);
+  
+  // Handle height slider change (keeping for compatibility)
+  const handleHeightChange = useCallback((newHeight) => {
+    updateHeight(newHeight);
+  }, [updateHeight]);
   
   // Handle drag start
   const handleDragStart = useCallback((event, index) => {
@@ -387,24 +395,8 @@ const StepFunctionVisualizer = () => {
       const heightScale = MAX_HEIGHT / (chartRect.height * 0.4); // Reduced divisor to allow for larger height changes
       const newHeight = Math.max(0, startHeight + deltaY * heightScale); // Removed upper limit
       
-      // Update current height
-      setCurrentHeight(newHeight);
-      
-      // Update step function and calculate autoconvolution in real-time
-      setStepFunction(prev => {
-        const updated = [...prev];
-        updated[selectedPiece] = {
-          ...updated[selectedPiece],
-          y: newHeight
-        };
-        
-        // Calculate autoconvolution immediately for real-time feedback
-        const result = calculateAutoconvolutionData(updated);
-        setAutoconvolution(result);
-        setTotalHeight(calculateTotalHeight(updated));
-        
-        return updated;
-      });
+      // Use the unified update height function
+      updateHeight(newHeight);
     };
     
     const handleMouseUp = () => {
@@ -418,7 +410,7 @@ const StepFunctionVisualizer = () => {
     // Add event listeners
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
-  }, [selectedPiece, currentHeight, handlePieceClick]);
+  }, [selectedPiece, currentHeight, handlePieceClick, updateHeight]);
   
   // Reset zoom (defined first to avoid circular dependency)
   const resetZoom = useCallback(() => {
@@ -813,47 +805,103 @@ const StepFunctionVisualizer = () => {
             </div>
             
             <div>
-              <div className="mb-2 font-medium">Height Adjustment: {currentHeight.toFixed(2)}</div>
-              <div className="relative w-full">
-                <input
-                  type="range"
-                  min="0"
-                  max={MAX_HEIGHT * 5}
-                  step="0.1"
-                  value={currentHeight}
+              <div className="mb-2 font-medium flex justify-between items-center">
+                <span>Height Adjustment:</span>
+                <div className="flex items-center space-x-2">
+                  <button 
+                    onClick={() => {
+                      if (selectedPiece === null) return;
+                      const newHeight = Math.max(0, currentHeight - 0.01);
+                      updateHeight(newHeight);
+                    }}
+                    disabled={selectedPiece === null}
+                    className={`p-1 rounded ${selectedPiece === null ? 'text-gray-400' : 'text-blue-500 hover:bg-blue-100'}`}
+                    title="Decrease by 0.01"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
+                    </svg>
+                  </button>
+                  
+                  <input
+                    type="number"
+                    min="0"
+                    max={MAX_HEIGHT * 5}
+                    step="0.01"
+                    value={currentHeight}
+                    disabled={selectedPiece === null}
+                    onChange={(e) => {
+                      if (selectedPiece === null) return;
+                      const newHeight = Number(e.target.value);
+                      if (!isNaN(newHeight) && newHeight >= 0) {
+                        updateHeight(newHeight);
+                      }
+                    }}
+                    className="w-20 p-1 text-sm text-center border rounded"
+                  />
+                  
+                  <button 
+                    onClick={() => {
+                      if (selectedPiece === null) return;
+                      const newHeight = currentHeight + 0.01;
+                      updateHeight(newHeight);
+                    }}
+                    disabled={selectedPiece === null}
+                    className={`p-1 rounded ${selectedPiece === null ? 'text-gray-400' : 'text-blue-500 hover:bg-blue-100'}`}
+                    title="Increase by 0.01"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              
+              <div className="flex space-x-2 mb-2">
+                <div className="relative w-full">
+                  <input
+                    type="range"
+                    min="0"
+                    max={MAX_HEIGHT * 5}
+                    step="0.01"
+                    value={currentHeight}
+                    disabled={selectedPiece === null}
+                    className="w-full slider-thumb-orange"
+                    onInput={(e) => {
+                      if (selectedPiece === null) return;
+                      const newHeight = Number(e.target.value);
+                      updateHeight(newHeight);
+                    }}
+                    style={{
+                      background: selectedPiece !== null ? 
+                        `linear-gradient(to right, #ff7300 0%, #ff7300 ${(currentHeight / (MAX_HEIGHT * 5)) * 100}%, #e5e7eb ${(currentHeight / (MAX_HEIGHT * 5)) * 100}%, #e5e7eb 100%)` : 
+                        '#e5e7eb'
+                    }}
+                  />
+                </div>
+              </div>
+              
+              <div className="flex justify-between text-xs text-gray-500">
+                <button 
+                  onClick={() => updateHeight(0.1)}
                   disabled={selectedPiece === null}
-                  className="w-full slider-thumb-orange"
-                  onInput={(e) => {
-                    if (selectedPiece === null) return;
-                    
-                    // Get new height value from slider
-                    const newHeight = Number(e.target.value);
-                    
-                    // Update current height value
-                    setCurrentHeight(newHeight);
-                    
-                    // Update both step function and display in sync
-                    setStepFunction(prev => {
-                      const updated = [...prev];
-                      updated[selectedPiece] = {
-                        ...updated[selectedPiece],
-                        y: newHeight
-                      };
-                      
-                      // Calculate autoconvolution in the same update
-                      // This ensures the step function and autoconvolution stay in sync
-                      calculateAutoconvolution(updated);
-                      updateTotalHeight(updated);
-                      
-                      return updated;
-                    });
-                  }}
-                  style={{
-                    background: selectedPiece !== null ? 
-                      `linear-gradient(to right, #ff7300 0%, #ff7300 ${(currentHeight / (MAX_HEIGHT * 5)) * 100}%, #e5e7eb ${(currentHeight / (MAX_HEIGHT * 5)) * 100}%, #e5e7eb 100%)` : 
-                      '#e5e7eb'
-                  }}
-                />
+                  className={`${selectedPiece === null ? 'text-gray-400' : 'text-blue-500 hover:underline'}`}
+                >0.1</button>
+                <button 
+                  onClick={() => updateHeight(1)}
+                  disabled={selectedPiece === null}
+                  className={`${selectedPiece === null ? 'text-gray-400' : 'text-blue-500 hover:underline'}`}
+                >1.0</button>
+                <button 
+                  onClick={() => updateHeight(5)}
+                  disabled={selectedPiece === null}
+                  className={`${selectedPiece === null ? 'text-gray-400' : 'text-blue-500 hover:underline'}`}
+                >5.0</button>
+                <button 
+                  onClick={() => updateHeight(10)}
+                  disabled={selectedPiece === null}
+                  className={`${selectedPiece === null ? 'text-gray-400' : 'text-blue-500 hover:underline'}`}
+                >10.0</button>
               </div>
             </div>
           </div>
