@@ -1387,6 +1387,11 @@ const StepFunctionVisualizer = () => {
         </div>
         <CustomLineChart />
         <div className="text-sm mt-2 text-red-600">Google's bound: {GOOGLE_BOUND} (red line)</div>
+        <div className="text-sm mt-4 text-gray-600 text-center">
+          <a href="https://github.com/damek/alpha_evolve_problem_B1" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+            View on GitHub
+          </a>
+        </div>
       </div>
       
     </div>
