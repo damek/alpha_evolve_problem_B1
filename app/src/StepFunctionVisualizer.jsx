@@ -379,16 +379,46 @@ const StepFunctionVisualizer = () => {
           
           <div>
             <div className="mb-2">Height Adjustment: {currentHeight.toFixed(2)}</div>
-            <input
-              type="range"
-              min="0"
-              max={MAX_HEIGHT * 5}
-              step="0.1"
-              value={currentHeight}
-              onChange={(e) => handleHeightChange(Number(e.target.value))}
-              className="w-full"
-              disabled={selectedPiece === null}
-            />
+            <div className="relative w-full">
+              <input
+                type="range"
+                min="0"
+                max={MAX_HEIGHT * 5}
+                step="0.1"
+                value={currentHeight}
+                onInput={(e) => {
+                  // For smooth updates during dragging the slider
+                  const newHeight = Number(e.target.value);
+                  if (selectedPiece !== null) {
+                    // Update current height
+                    setCurrentHeight(newHeight);
+                    
+                    // Update step function directly without triggering a React re-render
+                    const updated = [...stepFunction];
+                    updated[selectedPiece] = {
+                      ...updated[selectedPiece],
+                      y: newHeight
+                    };
+                    
+                    // Calculate autoconvolution directly
+                    stateRef.current.stepFunction = updated;
+                    calculateAutoconvolution(updated);
+                    updateTotalHeight(updated);
+                  }
+                }}
+                onChange={(e) => {
+                  // Final update when the slider is released
+                  handleHeightChange(Number(e.target.value));
+                }}
+                className="w-full slider-thumb-orange"
+                disabled={selectedPiece === null}
+                style={{
+                  background: selectedPiece !== null ? 
+                    `linear-gradient(to right, #ff7300 0%, #ff7300 ${(currentHeight / (MAX_HEIGHT * 5)) * 100}%, #e5e7eb ${(currentHeight / (MAX_HEIGHT * 5)) * 100}%, #e5e7eb 100%)` : 
+                    '#e5e7eb'
+                }}
+              />
+            </div>
           </div>
         </div>
       </div>

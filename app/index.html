@@ -5,6 +5,34 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Step Function Autoconvolution</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Custom slider styling */
+    .slider-thumb-orange::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: #ff7300;
+      cursor: pointer;
+    }
+    
+    .slider-thumb-orange::-moz-range-thumb {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: #ff7300;
+      cursor: pointer;
+      border: none;
+    }
+    
+    input[type=range] {
+      -webkit-appearance: none;
+      margin: 10px 0;
+      height: 8px;
+      border-radius: 4px;
+    }
+  </style>
 </head>
 <body>
   <div id="root"></div>
