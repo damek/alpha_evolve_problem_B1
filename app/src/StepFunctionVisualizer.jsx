@@ -1003,7 +1003,7 @@ const StepFunctionVisualizer = () => {
                     <div className="flex items-center justify-between">
                       <div className="text-sm">
                         <span className="font-medium">Max Value:</span> 
-                        <span className="text-green-700 ml-1">{maxAutoconvValue.toFixed(4)}</span>
+                        <span className="text-green-700 ml-1">{maxAutoconvValue.toFixed(6)}</span>
                         <button
                           onClick={() => {
                             navigator.clipboard.writeText(maxAutoconvValue.toFixed(6))
@@ -1061,7 +1061,7 @@ const StepFunctionVisualizer = () => {
       <div className="bg-white p-4 rounded-lg shadow">
         <div className="flex justify-between items-center mb-2">
           <div className="font-semibold">LP Autoconvolution (f*f)(t)/(∫f)² (P={numPieces})</div>
-          <div className="text-green-700">Max Value: {maxAutoconvValue.toFixed(4)}</div>
+          <div className="text-green-700">Max Value: {maxAutoconvValue.toFixed(6)}</div>
         </div>
         <CustomLineChart />
         <div className="text-sm mt-2 text-red-600">Google's bound: {GOOGLE_BOUND} (red line)</div>
