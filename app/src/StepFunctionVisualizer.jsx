@@ -23,6 +23,13 @@ const StepFunctionVisualizer = () => {
   // Refs
   const barChartRef = useRef(null);
   
+  // Reference to store the current values for debounced operations
+  const stateRef = useRef({
+    autoConvTimeout: null,
+    maxAutoTimeout: null,
+    stepFunction: []
+  });
+  
   // Initialize step function on component mount or when number of pieces changes
   useEffect(() => {
     generateRandomStepFunction();
@@ -31,8 +38,23 @@ const StepFunctionVisualizer = () => {
   // Update max autoconvolution value when autoconvolution changes
   useEffect(() => {
     if (autoconvolution.length > 0) {
-      const maxVal = Math.max(...autoconvolution.map(point => point.y));
-      setMaxAutoconvValue(maxVal);
+      // Clear any pending timeout
+      if (stateRef.current.maxAutoTimeout) {
+        clearTimeout(stateRef.current.maxAutoTimeout);
+      }
+      
+      // Set a new timeout
+      stateRef.current.maxAutoTimeout = setTimeout(() => {
+        const maxVal = Math.max(...autoconvolution.map(point => point.y));
+        setMaxAutoconvValue(maxVal);
+      }, 100);
+      
+      // Cleanup on unmount
+      return () => {
+        if (stateRef.current.maxAutoTimeout) {
+          clearTimeout(stateRef.current.maxAutoTimeout);
+        }
+      };
     }
   }, [autoconvolution]);
   
@@ -142,12 +164,22 @@ const StepFunctionVisualizer = () => {
         y: newHeight
       };
       
-      // Calculate autoconvolution and update total height
-      calculateAutoconvolution(updated);
-      updateTotalHeight(updated);
-      
+      // Update reference for debounced calculations
+      stateRef.current.stepFunction = updated;
       return updated;
     });
+    
+    // Clear existing timeout if there is one
+    if (stateRef.current.autoConvTimeout) {
+      clearTimeout(stateRef.current.autoConvTimeout);
+    }
+    
+    // Debounced auto-convolution update
+    stateRef.current.autoConvTimeout = setTimeout(() => {
+      // Calculate autoconvolution and update total height using the latest step function
+      calculateAutoconvolution(stateRef.current.stepFunction);
+      updateTotalHeight(stateRef.current.stepFunction);
+    }, 100); // 100ms debounce
   }, [selectedPiece, calculateAutoconvolution, updateTotalHeight]);
   
   // Handle drag start
@@ -174,8 +206,22 @@ const StepFunctionVisualizer = () => {
       const heightScale = MAX_HEIGHT / (chartRect.height * 0.4); // Reduced divisor to allow for larger height changes
       const newHeight = Math.max(0, startHeight + deltaY * heightScale); // Removed upper limit
       
-      // Update height
-      handleHeightChange(newHeight);
+      // Don't update the auto-convolution on every move, just update the height
+      // Update the height directly rather than using handleHeightChange to avoid frequent calculation
+      setCurrentHeight(newHeight);
+      
+      // Update step function without triggering autoconvolution
+      setStepFunction(prev => {
+        const updated = [...prev];
+        updated[selectedPiece] = {
+          ...updated[selectedPiece],
+          y: newHeight
+        };
+        
+        // Update reference for debounced calculations
+        stateRef.current.stepFunction = updated;
+        return updated;
+      });
     };
     
     const handleMouseUp = () => {
@@ -184,6 +230,10 @@ const StepFunctionVisualizer = () => {
       // Remove event listeners
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
+      
+      // Now that dragging is done, update autoconvolution
+      calculateAutoconvolution(stateRef.current.stepFunction);
+      updateTotalHeight(stateRef.current.stepFunction);
     };
     
     // Add event listeners
@@ -206,6 +256,7 @@ const StepFunctionVisualizer = () => {
               }
             }}
             isAnimationActive={false}
+            throttleDelay={16}
           >
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis
@@ -230,24 +281,40 @@ const StepFunctionVisualizer = () => {
               dataKey="y" 
               isAnimationActive={false}
               shape={(props) => {
-                const { x, y, width, height, index } = props;
+                const { x, y, width, height, index, background } = props;
+                const chartHeight = background?.height || 0;
+                
                 return (
-                  <rect
-                    x={x}
-                    y={y}
-                    width={width}
-                    height={height}
-                    fill={selectedPiece === index ? "#ff7300" : "#8884d8"}
-                    cursor={selectedPiece === index ? 'ns-resize' : 'pointer'}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handlePieceClick(index);
-                    }}
-                    onMouseDown={(e) => {
-                      e.stopPropagation();
-                      handleDragStart(e, index);
-                    }}
-                  />
+                  <g>
+                    {/* Invisible full-height clickable area */}
+                    <rect
+                      x={x}
+                      y={0}
+                      width={width}
+                      height={chartHeight}
+                      fill="transparent"
+                      cursor={selectedPiece === index ? 'ns-resize' : 'pointer'}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePieceClick(index);
+                      }}
+                      onMouseDown={(e) => {
+                        e.stopPropagation();
+                        handleDragStart(e, index);
+                      }}
+                    />
+                    
+                    {/* Visible bar */}
+                    <rect
+                      x={x}
+                      y={y}
+                      width={width}
+                      height={height}
+                      fill={selectedPiece === index ? "#ff7300" : "#8884d8"}
+                      cursor={selectedPiece === index ? 'ns-resize' : 'pointer'}
+                      pointerEvents="none" // Let the invisible rectangle handle events
+                    />
+                  </g>
                 );
               }}
             />
@@ -265,6 +332,7 @@ const StepFunctionVisualizer = () => {
           <LineChart 
             data={autoconvolution}
             isAnimationActive={false}
+            throttleDelay={16}
           >
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis
